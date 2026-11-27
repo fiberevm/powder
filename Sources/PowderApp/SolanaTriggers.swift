@@ -70,6 +70,7 @@ final class SolanaTriggerStore: ObservableObject {
         }
         triggers.removeAll { $0.walletID == walletID && $0.token.mint == token.address && ($0.kind == kind || !$0.isActive) }
         triggers.insert(SolanaTrigger(walletID: walletID, token: .solana(token), kind: kind, price: price), at: 0)
+        Track.event("trigger_set", ["kind": kind == .stopLoss ? "stop_loss" : "take_profit", "asset": token.symbol, "mint": token.address])
         save()
         NotificationPresenter.center?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         return nil

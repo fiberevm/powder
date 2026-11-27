@@ -63,7 +63,7 @@
     <h2>Where the milliseconds go</h2>
     <p class="note">From keypress to confirmed, out of Powder's own order log. Powder's part is too small to draw to scale; the rest is the network and the chain, which every interface pays.</p>
     <div class="paths" id="paths"></div>
-    <p class="fine">Hyperliquid: median of eight market orders. Solana: the faster of two swaps sent through a public RPC (the other took 1,168 ms); Powder also sends through Nozomi, which hands the transaction to the block leader. Signing times are medians of 2,000 runs in a release build.</p>
+    <p class="fine">Hyperliquid: median of eight market orders. Solana: send and landing times of a swap sent through a public RPC; Powder also sends through Nozomi, which hands the transaction to the block leader. The route is priced before the key is pressed: while a ticket is in use, Powder keeps the swap its buttons would send priced and built, so the order itself is only signing and sending. Signing times are medians of 2,000 runs in a release build.</p>
     <div class="scroll">
     <table class="compare">
       <thead>
@@ -73,7 +73,7 @@
         <tr><th>Signing</th><td class="us">Native code, 0.08 ms. No popup, no extension.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
         <tr><th>Where the key lives</th><td class="us">macOS Keychain.</td><td>Browser storage, an extension, or the platform.</td></tr>
         <tr><th>Path to the chain</th><td class="us">Straight to Hyperliquid's API, or to Nozomi for Solana.</td><td>Usually through the site's own servers first.</td></tr>
-        <tr><th>When you see it</th><td class="us">At the keypress on Hyperliquid; once priced on Solana. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
+        <tr><th>When you see it</th><td class="us">At the keypress, on both. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
         <tr><th>Time to land</th><td class="us">Measured above.</td><td>Not published, and not measurable without trading on each.</td></tr>
       </tbody>
     </table>

@@ -75,7 +75,24 @@ final class PerpsModel {
     private(set) var drawings: [ChartDrawing] = []
     /// The drawing tool armed for the next drag or click; it disarms after one use.
     private(set) var drawTool: DrawTool?
+    /// The drawing picked out with a click: it shows its handles, and Delete removes it.
+    private(set) var selectedDrawing: UUID?
     private(set) var isLoadingHistory = false
+
+    /// What undo steps back to: the drawings and price lines as they were before a change.
+    private struct DrawingState {
+        let drawings: [ChartDrawing]
+        let lines: [Double]
+    }
+    private var undoStack: [DrawingState] = []
+    private var redoStack: [DrawingState] = []
+
+    /// Open time of the newest candle shown while older candles are replayed; nil is live.
+    private(set) var replayTime: Int64?
+    private(set) var isReplayPlaying = false
+    private var replayTask: Task<Void, Never>?
+    /// Bumped to have the chart copy a picture of itself to the clipboard.
+    private(set) var snapshotRequest = 0
 
     // Overlays
     var isHelpOpen = false
@@ -128,6 +145,8 @@ final class PerpsModel {
     private var viewers = 0
 
     /// Called after the tab switches to a different market.
+    /// True while this tab is the selected one in the active pane: the one the trade keys act on.
+    var isFocusedPane = false
     var onCoinChange: (() -> Void)?
     /// Opens a link from the token's details in a web tab.
     var onOpenLink: ((URL) -> Void)?
@@ -146,6 +165,8 @@ final class PerpsModel {
         let price: Double
         /// How far, in price, counts as "on" a line at this zoom.
         let tolerance: Double
+        /// The drawing under the pointer, if any.
+        var drawing: UUID?
     }
 
     func notify(_ text: String) {
@@ -244,6 +265,7 @@ final class PerpsModel {
 
     func select(coin newCoin: String) {
         guard solana == nil, newCoin != coin else { return }
+        Track.event("market_opened", ["venue": Track.Venue.hyperliquid.rawValue, "market": "\(newCoin)/USDC", "asset": newCoin, "kind": "perp", "in_tab": true])
         coin = newCoin
         ctx = markets.first { $0.name == newCoin }?.ctx
         book = nil
@@ -253,6 +275,9 @@ final class PerpsModel {
         sideWidth = Self.savedSideWidth(newCoin)
         drawings = Self.loadDrawings(newCoin)
         drawTool = nil
+        selectedDrawing = nil
+        undoStack = []
+        redoStack = []
         grouping = .full
         onCoinChange?()
         reloadCandles()
@@ -267,6 +292,7 @@ final class PerpsModel {
 
     func setInterval(_ next: HLInterval) {
         guard next != interval, intervals.contains(next) else { return }
+        Track.event("chart_interval_changed", ["interval": next.rawValue, "venue": (solana == nil ? Track.Venue.hyperliquid : .solana).rawValue])
         interval = next
         resetChartData()
         reloadCandles()
@@ -327,47 +353,209 @@ final class PerpsModel {
 
     func toggle(_ indicator: ChartIndicator) {
         chartSettings.indicators.formSymmetricDifference([indicator])
+        Track.event("chart_indicator_toggled", ["indicator": "\(indicator)", "on": chartSettings.indicators.contains(indicator)])
     }
 
     /// Adds a horizontal price line, or removes the one within `tolerance` of `price`.
     func togglePriceLine(at price: Double, tolerance: Double) {
+        checkpoint()
         if let index = priceLines.firstIndex(where: { abs($0 - price) <= tolerance }) {
             priceLines.remove(at: index)
         } else if price > 0 {
             priceLines.append(price)
         }
-        UserDefaults.standard.set(priceLines, forKey: Self.linesKey(storageKey))
+        saveLines()
+    }
+
+    func movePriceLine(at index: Int, to price: Double) {
+        guard priceLines.indices.contains(index), price > 0, priceLines[index] != price else { return }
+        checkpoint()
+        priceLines[index] = price
+        saveLines()
     }
 
     func clearPriceLines() {
+        checkpoint()
         priceLines = []
-        UserDefaults.standard.removeObject(forKey: Self.linesKey(storageKey))
+        saveLines()
     }
 
     func setDrawTool(_ tool: DrawTool?) {
         drawTool = tool
+        if tool != nil { selectedDrawing = nil }
+    }
+
+    func selectDrawing(_ id: UUID?) {
+        if selectedDrawing != id { selectedDrawing = id }
     }
 
     func addDrawing(_ drawing: ChartDrawing) {
-        // A click without a drag is not a line.
-        guard drawing.startTime != drawing.endTime || drawing.startPrice != drawing.endPrice else { return }
+        // A click without a drag is not a line, unless the tool is placed with a click.
+        guard drawing.kind.isOneClick || drawing.startTime != drawing.endTime || drawing.startPrice != drawing.endPrice else { return }
+        checkpoint()
         drawings.append(drawing)
+        selectedDrawing = drawing.id
         saveDrawings()
+    }
+
+    /// Replaces a drawing with its moved, reshaped or recoloured self.
+    func updateDrawing(_ drawing: ChartDrawing) {
+        guard let index = drawings.firstIndex(where: { $0.id == drawing.id }), drawings[index] != drawing else { return }
+        checkpoint()
+        drawings[index] = drawing
+        saveDrawings()
+    }
+
+    func setDrawingColor(_ id: UUID, to color: Int) {
+        guard var drawing = drawings.first(where: { $0.id == id }) else { return }
+        drawing.color = color
+        updateDrawing(drawing)
+    }
+
+    /// A copy of the drawing, a few candles along so it can be seen and dragged into place.
+    func duplicateDrawing(_ id: UUID) {
+        guard var copy = drawings.first(where: { $0.id == id }) else { return }
+        copy.id = UUID()
+        copy.startTime += 3 * interval.milliseconds
+        copy.endTime += 3 * interval.milliseconds
+        addDrawing(copy)
     }
 
     func removeDrawing(_ id: UUID) {
+        guard drawings.contains(where: { $0.id == id }) else { return }
+        checkpoint()
         drawings.removeAll { $0.id == id }
+        if selectedDrawing == id { selectedDrawing = nil }
         saveDrawings()
     }
 
-    /// Removes every drawn line and horizontal price line on this coin.
+    /// Removes the selected drawing. False when nothing is selected.
+    func removeSelectedDrawing() -> Bool {
+        guard let selectedDrawing else { return false }
+        removeDrawing(selectedDrawing)
+        return true
+    }
+
+    /// Removes every drawing and horizontal price line on this coin.
     func clearDrawings() {
+        guard hasDrawings else { return }
+        checkpoint()
         drawings = []
+        priceLines = []
+        selectedDrawing = nil
         saveDrawings()
-        clearPriceLines()
+        saveLines()
     }
 
     var hasDrawings: Bool { !drawings.isEmpty || !priceLines.isEmpty }
+    var canUndoDrawing: Bool { !undoStack.isEmpty }
+    var canRedoDrawing: Bool { !redoStack.isEmpty }
+
+    /// Remembers the drawings as they are, ahead of a change to them.
+    private func checkpoint() {
+        undoStack.append(DrawingState(drawings: drawings, lines: priceLines))
+        if undoStack.count > 100 { undoStack.removeFirst() }
+        redoStack = []
+    }
+
+    func undoDrawing() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(DrawingState(drawings: drawings, lines: priceLines))
+        restore(previous)
+    }
+
+    func redoDrawing() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(DrawingState(drawings: drawings, lines: priceLines))
+        restore(next)
+    }
+
+    private func restore(_ state: DrawingState) {
+        drawings = state.drawings
+        priceLines = state.lines
+        selectedDrawing = nil
+        saveDrawings()
+        saveLines()
+    }
+
+    private func saveLines() {
+        if priceLines.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.linesKey(storageKey))
+        } else {
+            UserDefaults.standard.set(priceLines, forKey: Self.linesKey(storageKey))
+        }
+    }
+
+    func copyChartImage() {
+        snapshotRequest += 1
+    }
+
+    // MARK: Replay
+
+    /// What the chart draws: every candle, or during a replay only those up to the replayed one.
+    var chartCandles: [HLCandle] {
+        guard let replayTime else { return candles }
+        var low = 0, high = candles.count
+        while low < high {
+            let middle = (low + high) / 2
+            if candles[middle].t <= replayTime { low = middle + 1 } else { high = middle }
+        }
+        return Array(candles[..<low])
+    }
+
+    /// Hides the candles after a point, to step or play through them again: from the inspected candle,
+    /// else from where the chart is scrolled to, else a hundred candles back.
+    func startReplay() {
+        guard candles.count > 2 else { return }
+        let index: Int
+        if let cursorTime, let inspected = candles.lastIndex(where: { $0.t == cursorTime }) {
+            index = inspected
+        } else if chartOffset >= 1 {
+            index = candles.count - 1 - Int(chartOffset)
+        } else {
+            index = candles.count - 1 - min(100, candles.count / 2)
+        }
+        replayTime = candles[min(max(index, 1), candles.count - 2)].t
+        cursorTime = nil
+        chartOffset = 0
+        notify("Replay: , and . step a candle, space plays, esc returns to live")
+    }
+
+    /// Moves the replay by whole candles. Stepping onto the live candle ends it.
+    func stepReplay(_ delta: Int) {
+        guard let replayTime, let index = candles.lastIndex(where: { $0.t <= replayTime }) else { return }
+        let next = index + delta
+        if next >= candles.count - 1 {
+            stopReplay()
+        } else {
+            self.replayTime = candles[max(next, 1)].t
+        }
+    }
+
+    func toggleReplayPlayback() {
+        guard replayTime != nil else { return }
+        if isReplayPlaying {
+            replayTask?.cancel()
+            replayTask = nil
+            isReplayPlaying = false
+            return
+        }
+        isReplayPlaying = true
+        replayTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled, let self, self.isReplayPlaying else { return }
+                self.stepReplay(1)
+            }
+        }
+    }
+
+    func stopReplay() {
+        replayTask?.cancel()
+        replayTask = nil
+        isReplayPlaying = false
+        replayTime = nil
+    }
 
     private func saveDrawings() {
         if let data = try? JSONEncoder().encode(drawings) {
@@ -415,6 +603,7 @@ final class PerpsModel {
         candles = []
         cursorTime = nil
         chartOffset = 0
+        stopReplay()
         resetPriceScale()
     }
 
@@ -647,6 +836,8 @@ final class PerpsModel {
                                 stats.change24 = own.change24
                             }
                             stats.exchanges = own.exchanges
+                            stats.poolFeeBps = own.poolFeeBps
+                            stats.hasDynamicFee = own.hasDynamicFee
                         }
                         solanaStats = stats
                         ctx = HLAssetCtx(

@@ -4,7 +4,7 @@ import SwiftUI
 // MARK: - Settings
 
 enum ChartStyle: String, Codable, CaseIterable, Sendable {
-    case candles, hollow, heikinAshi, bars, line, area
+    case candles, hollow, heikinAshi, bars, line, step, area, baseline
 
     var title: String {
         switch self {
@@ -13,23 +13,53 @@ enum ChartStyle: String, Codable, CaseIterable, Sendable {
         case .heikinAshi: "Heikin Ashi"
         case .bars: "Bars"
         case .line: "Line"
+        case .step: "Step Line"
         case .area: "Area"
+        case .baseline: "Baseline"
         }
     }
+
+    /// Drawn through the closes alone.
+    var usesClose: Bool { self == .line || self == .step || self == .area || self == .baseline }
 }
 
 enum ChartIndicator: String, Codable, CaseIterable, Sendable {
-    case volume, ma, ema, bollinger, vwap, rsi, macd
+    // On the price pane.
+    case volume, volumeProfile, ma, ema, bollinger, vwap, supertrend, sar, ichimoku, donchian, keltner
+    // Each in a pane of its own.
+    case rsi, macd, stoch, stochRSI, atr, obv, cci, mfi, williams, adx
 
     var title: String {
         switch self {
         case .volume: "Volume"
+        case .volumeProfile: "Volume Profile (visible range)"
         case .ma: "MA 7 / 25 / 99"
         case .ema: "EMA 12 / 26"
         case .bollinger: "Bollinger Bands 20, 2"
         case .vwap: "VWAP (daily)"
+        case .supertrend: "Supertrend 10, 3"
+        case .sar: "Parabolic SAR"
+        case .ichimoku: "Ichimoku Cloud 9, 26, 52"
+        case .donchian: "Donchian Channels 20"
+        case .keltner: "Keltner Channels 20, 2"
         case .rsi: "RSI 14"
         case .macd: "MACD 12, 26, 9"
+        case .stoch: "Stochastic 14, 3, 3"
+        case .stochRSI: "Stochastic RSI 14"
+        case .atr: "ATR 14"
+        case .obv: "On-Balance Volume"
+        case .cci: "CCI 20"
+        case .mfi: "Money Flow Index 14"
+        case .williams: "Williams %R 14"
+        case .adx: "ADX / DMI 14"
+        }
+    }
+
+    /// Drawn in a pane of its own under the price.
+    var isPane: Bool {
+        switch self {
+        case .rsi, .macd, .stoch, .stochRSI, .atr, .obv, .cci, .mfi, .williams, .adx: true
+        default: false
         }
     }
 }
@@ -39,8 +69,32 @@ struct ChartSettings: Codable, Equatable, Sendable {
     var style = ChartStyle.candles
     var indicators: Set<ChartIndicator> = [.volume]
     var logScale = false
+    /// Labels the price axis with the change from the first candle on screen.
+    var percentScale = false
+    /// Turns the price axis upside down.
+    var invertScale = false
+    /// Drawing points snap to the nearest open, high, low or close.
+    var magnet = false
+    var lockDrawings = false
+    var hideDrawings = false
 
     private static let key = "chart.settings"
+
+    init() {}
+
+    /// Every field is optional on disk, so settings saved by an older or newer build still load.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func flag(_ key: CodingKeys) -> Bool { (try? values.decode(Bool.self, forKey: key)) ?? false }
+        style = (try? values.decode(ChartStyle.self, forKey: .style)) ?? .candles
+        indicators = Set(((try? values.decode([String].self, forKey: .indicators)) ?? ["volume"]).compactMap(ChartIndicator.init))
+        logScale = flag(.logScale)
+        percentScale = flag(.percentScale)
+        invertScale = flag(.invertScale)
+        magnet = flag(.magnet)
+        lockDrawings = flag(.lockDrawings)
+        hideDrawings = flag(.hideDrawings)
+    }
 
     static func load(from defaults: UserDefaults = .standard) -> ChartSettings {
         defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(ChartSettings.self, from: $0) } ?? ChartSettings()
@@ -49,31 +103,6 @@ struct ChartSettings: Codable, Equatable, Sendable {
     func save(to defaults: UserDefaults = .standard) {
         if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: Self.key) }
     }
-}
-
-// MARK: - Drawings
-
-enum DrawTool: String, Codable, CaseIterable, Sendable {
-    case trend, ray, horizontal
-
-    var title: String {
-        switch self {
-        case .trend: "Trend line"
-        case .ray: "Ray"
-        case .horizontal: "Horizontal line"
-        }
-    }
-}
-
-/// A line the user drew, anchored in time and price so it holds its place on every interval and zoom.
-struct ChartDrawing: Codable, Equatable, Identifiable, Sendable {
-    var id = UUID()
-    /// `.trend` stops at its second point; `.ray` carries on past it.
-    var kind: DrawTool
-    var startTime: Int64
-    var startPrice: Double
-    var endTime: Int64
-    var endPrice: Double
 }
 
 // MARK: - Indicator math
@@ -219,12 +248,20 @@ struct PerpChart: View, Equatable {
     var levels: [ChartLevel] = []
     let drawings: [ChartDrawing]
     let drawTool: DrawTool?
+    var selectedDrawing: UUID?
+    /// True while old candles are being replayed: the newest one drawn is not the live one.
+    var isReplay = false
+    /// Bumped to copy a picture of the chart to the clipboard.
+    var snapshotRequest = 0
     let isLoadingHistory: Bool
 
     nonisolated static func == (lhs: PerpChart, rhs: PerpChart) -> Bool {
         lhs.cursorTime == rhs.cursorTime
             && lhs.drawings == rhs.drawings
             && lhs.drawTool == rhs.drawTool
+            && lhs.selectedDrawing == rhs.selectedDrawing
+            && lhs.isReplay == rhs.isReplay
+            && lhs.snapshotRequest == rhs.snapshotRequest
             && lhs.pitch == rhs.pitch
             && lhs.offset == rhs.offset
             && lhs.priceZoom == rhs.priceZoom
@@ -244,6 +281,9 @@ struct PerpChart: View, Equatable {
         case timeAxis(pitch: CGFloat)
         case measure
         case draw
+        /// Moving a drawing, or one of its handles.
+        case edit(original: ChartDrawing, handle: Int?)
+        case priceLine(index: Int)
     }
 
     /// Read so the canvas redraws when the theme changes, which `==` above would otherwise skip.
@@ -251,8 +291,27 @@ struct PerpChart: View, Equatable {
     @State private var hover: CGPoint?
     @State private var drag: DragKind?
     @State private var measure: ChartMeasure?
-    /// The line being dragged out with a drawing tool.
+    /// The drawing being dragged out with a tool, or the one being moved: shown in place of the saved one.
     @State private var draft: ChartDrawing?
+    /// A horizontal price line being dragged to a new price.
+    @State private var lineDrag: (index: Int, price: Double)?
+    @State private var cache = ChartSeriesCache()
+
+    private var canEditDrawings: Bool { !settings.lockDrawings && !settings.hideDrawings }
+
+    private func renderer(_ layout: ChartLayout, hover: CGPoint?) -> ChartRenderer {
+        var lines = priceLines
+        if let lineDrag, lines.indices.contains(lineDrag.index) { lines[lineDrag.index] = lineDrag.price }
+        return ChartRenderer(
+            layout: layout,
+            series: cache.series(window: layout.window, base: layout.base, indicators: settings.indicators, interval: interval),
+            cursorTime: cursorTime, hover: hover, measure: measure,
+            drawings: drawings.filter { $0.id != draft?.id } + (draft.map { [$0] } ?? []),
+            selectedDrawing: selectedDrawing, interval: interval,
+            decimals: decimals, settings: settings,
+            priceLines: lines, levels: levels, isReplay: isReplay, isLoadingHistory: isLoadingHistory
+        )
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -260,12 +319,7 @@ struct PerpChart: View, Equatable {
                 size: geometry.size, candles: candles, pitch: pitch, offset: offset,
                 priceZoom: priceZoom, pricePan: pricePan, settings: settings
             )
-            let renderer = ChartRenderer(
-                layout: layout, cursorTime: cursorTime, hover: hover, measure: measure,
-                drawings: drawings + (draft.map { [$0] } ?? []), interval: interval,
-                decimals: decimals, settings: settings,
-                priceLines: priceLines, levels: levels, isLoadingHistory: isLoadingHistory
-            )
+            let renderer = renderer(layout, hover: hover)
             // Once a second, for the countdown to the candle close.
             TimelineView(.periodic(from: .now, by: 1)) { timeline in
                 Canvas { context, _ in
@@ -295,24 +349,36 @@ struct PerpChart: View, Equatable {
                     return
                 }
                 guard layout.mainPane.contains(location) else { return }
-                if drawTool == .horizontal {
-                    model.togglePriceLine(at: layout.price(atY: location.y), tolerance: 0)
+                if let drawTool, drawTool.isOneClick {
+                    let price = settings.magnet ? layout.snappedPrice(at: location) : layout.price(atY: location.y)
+                    if drawTool == .horizontal {
+                        model.togglePriceLine(at: price, tolerance: 0)
+                    } else {
+                        let time = layout.time(atPointX: location.x, interval: interval)
+                        model.addDrawing(ChartDrawing(kind: drawTool, startTime: time, startPrice: price, endTime: time, endPrice: price))
+                    }
                     model.setDrawTool(nil)
                     return
                 }
-                guard NSEvent.modifierFlags.contains(.option) else { return }
-                // ⌥-click removes the drawn line under the pointer, else toggles a horizontal line.
-                if let hit = drawings.last(where: { layout.distance(from: location, to: $0, interval: interval) < 7 }) {
-                    model.removeDrawing(hit.id)
-                } else {
-                    model.togglePriceLine(at: layout.price(atY: location.y), tolerance: layout.priceSpan(points: 5))
+                let hit = settings.hideDrawings ? nil : drawing(at: location, layout)?.drawing
+                if NSEvent.modifierFlags.contains(.option) {
+                    // ⌥-click removes the drawing under the pointer, else toggles a horizontal line.
+                    if let hit {
+                        model.removeDrawing(hit.id)
+                    } else {
+                        model.togglePriceLine(at: layout.price(atY: location.y), tolerance: layout.priceSpan(points: 5))
+                    }
+                    return
                 }
+                model.selectDrawing(settings.lockDrawings ? nil : hit?.id)
             }
-            // Right-click: a menu at the pointer for trading and alerts at that price.
+            // Right-click: a menu at the pointer for trading and alerts at that price, and for the drawing there.
             .onRightClick { point in
                 guard layout.mainPane.contains(point) else { return }
+                let hit = settings.hideDrawings ? nil : drawing(at: point, layout)?.drawing
+                if let hit, !settings.lockDrawings { model.selectDrawing(hit.id) }
                 model.chartMenu = PerpsModel.ChartMenuRequest(
-                    point: point, price: layout.price(atY: point.y), tolerance: layout.priceSpan(points: 6)
+                    point: point, price: layout.price(atY: point.y), tolerance: layout.priceSpan(points: 6), drawing: hit?.id
                 )
                 DropdownCenter.dismiss = { [weak model] in model?.chartMenu = nil }
             }
@@ -340,8 +406,39 @@ struct PerpChart: View, Equatable {
                 }
             }
             .onChange(of: interval) { measure = nil }
+            .onChange(of: snapshotRequest) { copyImage(layout) }
         }
         .accessibilityLabel("Price chart, \(interval.rawValue) \(settings.style.title)")
+    }
+
+    /// The topmost drawing under a point, the selected one first so its handles win.
+    private func drawing(at point: CGPoint, _ layout: ChartLayout) -> (drawing: ChartDrawing, hit: DrawingHit)? {
+        if let selected = drawings.first(where: { $0.id == selectedDrawing }),
+           let hit = layout.hit(point, selected, interval: interval) {
+            return (selected, hit)
+        }
+        for drawing in drawings.reversed() {
+            if let hit = layout.hit(point, drawing, interval: interval) { return (drawing, hit) }
+        }
+        return nil
+    }
+
+    /// Puts a picture of the chart as it stands, without the pointer's crosshair, on the clipboard.
+    private func copyImage(_ layout: ChartLayout) {
+        let renderer = renderer(layout, hover: nil)
+        let content = Canvas { context, _ in renderer.draw(in: &context, now: .now) }
+            .frame(width: layout.size.width, height: layout.size.height)
+            .background(Term.background)
+            .environment(\.colorScheme, colorScheme)
+        let image = ImageRenderer(content: content)
+        image.scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let picture = image.nsImage else {
+            model.notify("Could not render the chart")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([picture])
+        model.notify("Chart image copied to the clipboard")
     }
 
     private func dragGesture(_ layout: ChartLayout) -> some Gesture {
@@ -349,22 +446,37 @@ struct PerpChart: View, Equatable {
             .onChanged { value in
                 if drag == nil {
                     let start = value.startLocation
+                    let inMain = layout.mainPane.contains(start)
                     if start.x > layout.plot.maxX {
                         drag = .priceAxis(zoom: priceZoom)
                     } else if start.y > layout.plot.maxY {
                         drag = .timeAxis(pitch: pitch)
-                    } else if let drawTool, drawTool != .horizontal, layout.mainPane.contains(start) {
+                    } else if let drawTool, !drawTool.isOneClick, inMain {
                         measure = nil
                         drag = .draw
                         let time = layout.time(atPointX: start.x, interval: interval)
-                        let price = layout.price(atY: start.y)
-                        draft = ChartDrawing(kind: drawTool, startTime: time, startPrice: price, endTime: time, endPrice: price)
+                        let price = settings.magnet ? layout.snappedPrice(at: start) : layout.price(atY: start.y)
+                        var drawing = ChartDrawing(kind: drawTool, startTime: time, startPrice: price, endTime: time, endPrice: price)
+                        // A channel starts a fixed width under its line; its third handle sets it from there.
+                        if drawTool == .channel { drawing.extra = layout.price(atY: layout.y(price) + 44) - price }
+                        draft = drawing
                     } else if NSEvent.modifierFlags.contains(.shift) {
                         drag = .measure
                         measure = ChartMeasure(
                             startIndex: layout.index(atX: start.x), startPrice: layout.price(atY: start.y),
                             endIndex: layout.index(atX: start.x), endPrice: layout.price(atY: start.y)
                         )
+                    } else if canEditDrawings, inMain, let found = drawing(at: start, layout) {
+                        measure = nil
+                        model.selectDrawing(found.drawing.id)
+                        draft = found.drawing
+                        if case let .handle(index) = found.hit {
+                            drag = .edit(original: found.drawing, handle: index)
+                        } else {
+                            drag = .edit(original: found.drawing, handle: nil)
+                        }
+                    } else if !settings.lockDrawings, inMain, let index = priceLines.firstIndex(where: { abs(layout.y($0) - start.y) < 5 }) {
+                        drag = .priceLine(index: index)
                     } else {
                         measure = nil
                         drag = .pan(offset: offset, pricePan: pricePan)
@@ -375,7 +487,8 @@ struct PerpChart: View, Equatable {
                     model.setViewport(offset: startOffset + value.translation.width / pitch)
                     // The price only moves by hand once the scale has been taken off auto.
                     if priceZoom != 1 || pricePan != 0 {
-                        model.setPriceScale(pan: startPan + value.translation.height / layout.priceZone.height / priceZoom)
+                        let direction: CGFloat = layout.isInverted ? -1 : 1
+                        model.setPriceScale(pan: startPan + direction * value.translation.height / layout.priceZone.height / priceZoom)
                     }
                 case let .priceAxis(startZoom):
                     model.setPriceScale(zoom: startZoom * exp(-value.translation.height * 0.006))
@@ -385,18 +498,40 @@ struct PerpChart: View, Equatable {
                     measure?.endIndex = layout.index(atX: value.location.x)
                     measure?.endPrice = layout.price(atY: value.location.y)
                 case .draw:
-                    draft?.endTime = layout.time(atPointX: value.location.x, interval: interval)
-                    draft?.endPrice = layout.price(atY: value.location.y)
+                    guard var drawing = draft else { break }
+                    drawing.endTime = layout.time(atPointX: value.location.x, interval: interval)
+                    drawing.endPrice = settings.magnet ? layout.snappedPrice(at: value.location) : layout.price(atY: value.location.y)
+                    // A position is dragged from entry to target; the stop starts at half that distance, for 2:1.
+                    if drawing.kind == .position { drawing.extra = drawing.startPrice - (drawing.endPrice - drawing.startPrice) / 2 }
+                    draft = drawing
+                case let .edit(original, handle):
+                    if let handle {
+                        draft = layout.reshaped(original, handle: handle, to: value.location, interval: interval, magnet: settings.magnet)
+                    } else {
+                        draft = layout.moved(original, dx: value.translation.width, dy: value.translation.height, interval: interval)
+                    }
+                case let .priceLine(index):
+                    lineDrag = (index, layout.price(atY: value.location.y))
                 case nil:
                     break
                 }
             }
             .onEnded { _ in
-                if case .draw = drag, let draft {
-                    model.addDrawing(draft)
-                    model.setDrawTool(nil)
+                switch drag {
+                case .draw:
+                    if let draft {
+                        model.addDrawing(draft)
+                        model.setDrawTool(nil)
+                    }
+                case let .edit(original, _):
+                    if let draft, draft != original { model.updateDrawing(draft) }
+                case .priceLine:
+                    if let lineDrag { model.movePriceLine(at: lineDrag.index, to: lineDrag.price) }
+                default:
+                    break
                 }
                 draft = nil
+                lineDrag = nil
                 drag = nil
             }
     }
@@ -487,7 +622,7 @@ enum ChartInput {
 
 // MARK: - Layout
 
-private struct ChartLayout {
+struct ChartLayout {
     static let axisWidth: CGFloat = 70
     static let timeAxisHeight: CGFloat = 20
     /// Empty candle slots kept to the right of the newest candle.
@@ -510,9 +645,12 @@ private struct ChartLayout {
     /// The part of the main pane prices are scaled to: below the legend, above the volume bars.
     let priceZone: CGRect
     let volumeZone: CGRect?
-    let rsiPane: CGRect?
-    let macdPane: CGRect?
+    /// The oscillator panes under the main one, top to bottom.
+    let panes: [(indicator: ChartIndicator, frame: CGRect)]
     let isLog: Bool
+    let isInverted: Bool
+    /// The first close on screen when the axis shows percent change from it.
+    let percentBase: Double?
     let low: Double
     let high: Double
     let maxVolume: Double
@@ -533,17 +671,21 @@ private struct ChartLayout {
         plot = CGRect(x: 0, y: 0, width: max(size.width - Self.axisWidth, 1), height: max(size.height - Self.timeAxisHeight, 1))
 
         // Oscillator panes stack under the main pane when there is room for them.
-        var subPanes: [ChartIndicator] = [.rsi, .macd].filter { settings.indicators.contains($0) }
-        let subHeight = min(max((plot.height * 0.2).rounded(), 64), 130)
-        while !subPanes.isEmpty, plot.height - CGFloat(subPanes.count) * subHeight < 150 { subPanes.removeLast() }
+        // They share what the main pane can spare, and the last ones drop out when that is too little.
+        var subPanes = ChartIndicator.allCases.filter { $0.isPane && settings.indicators.contains($0) }
+        var subHeight = min(max((plot.height * 0.2).rounded(), 64), 130)
+        while !subPanes.isEmpty {
+            subHeight = min(subHeight, ((plot.height - 150) / CGFloat(subPanes.count)).rounded(.down))
+            if subHeight >= 44 { break }
+            subPanes.removeLast()
+        }
         let mainHeight = plot.height - CGFloat(subPanes.count) * subHeight
         mainPane = CGRect(x: 0, y: 0, width: plot.width, height: mainHeight)
-        var paneFrames: [ChartIndicator: CGRect] = [:]
+        var frames: [(indicator: ChartIndicator, frame: CGRect)] = []
         for (position, pane) in subPanes.enumerated() {
-            paneFrames[pane] = CGRect(x: 0, y: mainHeight + CGFloat(position) * subHeight, width: plot.width, height: subHeight)
+            frames.append((pane, CGRect(x: 0, y: mainHeight + CGFloat(position) * subHeight, width: plot.width, height: subHeight)))
         }
-        rsiPane = paneFrames[.rsi]
-        macdPane = paneFrames[.macd]
+        panes = frames
 
         let volumeHeight = settings.indicators.contains(.volume) ? (mainHeight * 0.16).rounded() : 0
         volumeZone = volumeHeight > 0
@@ -563,10 +705,12 @@ private struct ChartLayout {
         window = settings.style == .heikinAshi ? ChartMath.heikinAshi(raw) : raw
 
         let shown = range.isEmpty ? window[0..<0] : window[(range.lowerBound - base)...]
-        let usesClose = settings.style == .line || settings.style == .area
+        let usesClose = settings.style.usesClose
         let rawLow = shown.map { usesClose ? $0.c : $0.l }.min() ?? 0
         let rawHigh = shown.map { usesClose ? $0.c : $0.h }.max() ?? 1
         isLog = settings.logScale && rawLow > 0
+        isInverted = settings.invertScale
+        percentBase = settings.percentScale ? shown.first(where: { $0.c > 0 })?.c : nil
         let transform: (Double) -> Double = isLog ? { log($0) } : { $0 }
         var autoLow = transform(rawLow), autoHigh = transform(rawHigh)
         if autoHigh <= autoLow {
@@ -600,11 +744,13 @@ private struct ChartLayout {
 
     func y(_ price: Double) -> CGFloat {
         let value = isLog ? log(max(price, .leastNonzeroMagnitude)) : price
-        return priceZone.minY + CGFloat((high - value) / (high - low)) * priceZone.height
+        let fraction = CGFloat((high - value) / (high - low))
+        return priceZone.minY + (isInverted ? 1 - fraction : fraction) * priceZone.height
     }
 
     func price(atY y: CGFloat) -> Double {
-        let value = high - Double((y - priceZone.minY) / priceZone.height) * (high - low)
+        let fraction = Double((y - priceZone.minY) / priceZone.height)
+        let value = high - (isInverted ? 1 - fraction : fraction) * (high - low)
         return isLog ? exp(value) : value
     }
 
@@ -629,27 +775,6 @@ private struct ChartLayout {
         return plot.maxX - (rightEdge - CGFloat(base) - CGFloat(position)) * pitch - pitch / 2
     }
 
-    /// The two screen points of a drawing; a ray's second point is pushed out to the plot's edge.
-    func points(of drawing: ChartDrawing, interval: HLInterval) -> (CGPoint, CGPoint) {
-        let start = CGPoint(x: x(time: drawing.startTime, interval: interval), y: y(drawing.startPrice))
-        var end = CGPoint(x: x(time: drawing.endTime, interval: interval), y: y(drawing.endPrice))
-        if drawing.kind == .ray, end != start {
-            let dx = end.x - start.x, dy = end.y - start.y
-            let reach = (abs(dx) > 0.5 ? (dx > 0 ? plot.maxX - start.x : start.x - plot.minX) / abs(dx) : 4_000 / max(abs(dy), 1))
-            end = CGPoint(x: start.x + dx * max(reach, 1), y: start.y + dy * max(reach, 1))
-        }
-        return (start, end)
-    }
-
-    func distance(from point: CGPoint, to drawing: ChartDrawing, interval: HLInterval) -> CGFloat {
-        let (a, b) = points(of: drawing, interval: interval)
-        let dx = b.x - a.x, dy = b.y - a.y
-        let lengthSquared = dx * dx + dy * dy
-        guard lengthSquared > 0 else { return hypot(point.x - a.x, point.y - a.y) }
-        let t = min(max(((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared, 0), 1)
-        return hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy))
-    }
-
     func candle(_ index: Int) -> HLCandle? {
         let position = index - base
         return window.indices.contains(position) ? window[position] : nil
@@ -658,39 +783,33 @@ private struct ChartLayout {
 
 // MARK: - Renderer
 
-private struct ChartRenderer {
+struct ChartRenderer {
     let layout: ChartLayout
+    let series: ChartSeries
     let cursorTime: Int64?
     let hover: CGPoint?
     let measure: ChartMeasure?
     let drawings: [ChartDrawing]
+    let selectedDrawing: UUID?
     let interval: HLInterval
     let decimals: Int
     let settings: ChartSettings
     let priceLines: [Double]
     let levels: [ChartLevel]
+    let isReplay: Bool
     let isLoadingHistory: Bool
 
-    private struct Overlay {
-        let label: String
-        let color: Color
-        let values: [Double?]
-    }
-
     /// User-drawn price lines; blue so they stand apart from the gold accent.
-    private static let lineColor = Color(dark: 0x3794FF, light: 0x0A6FD6)
-    private let labelFont = Font.system(size: 10.5, design: .monospaced)
+    private static let lineColor = ChartTint.blue
+    let labelFont = Font.system(size: 10.5, design: .monospaced)
     private let grid = Color.primary.opacity(0.07)
-    private let up = PowderPalette.signalGreen
-    private let down = PowderPalette.riskCoral
+    let up = PowderPalette.signalGreen
+    let down = PowderPalette.riskCoral
 
     private var zone: TimeZone { interval.isDaily ? .gmt : .current }
 
     func draw(in context: inout GraphicsContext, now: Date) {
         guard !layout.range.isEmpty else { return }
-        let closes = layout.window.map(\.c)
-        let overlays = makeOverlays(closes)
-        let bands = settings.indicators.contains(.bollinger) ? ChartMath.bollinger(closes) : nil
         let cursorIndex = cursorTime.flatMap { time in layout.range.last { layout.candle($0)?.t == time } }
 
         drawPriceAxis(&context)
@@ -699,23 +818,34 @@ private struct ChartRenderer {
         var pane = context
         pane.clip(to: Path(layout.mainPane))
         drawVolume(&pane)
-        if let bands { drawBands(bands, in: &pane) }
+        if settings.indicators.contains(.volumeProfile) { drawVolumeProfile(&pane) }
+        if let cloud = series.ichimoku { drawIchimoku(cloud, in: &pane) }
+        for band in series.bands { drawBand(band, in: &pane) }
         drawSeries(&pane)
-        for overlay in overlays {
-            stroke(overlay.values, color: overlay.color, y: layout.y, in: &pane)
+        for line in series.lines {
+            stroke(line.values, color: line.color, y: layout.y, in: &pane)
         }
+        if let trend = series.supertrend { drawSupertrend(trend, in: &pane) }
+        if let stops = series.sar { drawSAR(stops, in: &pane) }
         drawExtremes(&pane)
         drawPriceLines(&pane, axis: &context)
         drawLevels(&pane, axis: &context)
-        drawDrawings(&pane)
+        if !settings.hideDrawings { drawDrawings(&pane, axis: &context) }
         drawLastPrice(&context, now: now)
 
-        if let frame = layout.rsiPane { drawRSI(ChartMath.rsi(closes), frame: frame, cursor: cursorIndex, in: &context) }
-        if let frame = layout.macdPane { drawMACD(ChartMath.macd(closes), frame: frame, cursor: cursorIndex, in: &context) }
+        for (indicator, frame) in layout.panes {
+            if let study = series.panes[indicator] { drawPane(study, frame: frame, cursor: cursorIndex, in: &context) }
+        }
 
-        if let measure { drawMeasure(measure, in: &context) }
+        if let measure {
+            drawMeasure(
+                from: CGPoint(x: layout.x(measure.startIndex), y: layout.y(measure.startPrice)),
+                to: CGPoint(x: layout.x(measure.endIndex), y: layout.y(measure.endPrice)),
+                startPrice: measure.startPrice, endPrice: measure.endPrice, bars: measure.endIndex - measure.startIndex, in: &context
+            )
+        }
         drawCrosshair(cursorIndex, in: &context)
-        drawLegend(cursorIndex ?? layout.lastVisible, overlays: overlays, bands: bands, in: &context)
+        drawLegend(cursorIndex ?? layout.lastVisible, in: &context)
 
         if isLoadingHistory {
             context.draw(
@@ -723,23 +853,6 @@ private struct ChartRenderer {
                 at: CGPoint(x: 10, y: layout.mainPane.maxY - 12), anchor: .leading
             )
         }
-    }
-
-    private func makeOverlays(_ closes: [Double]) -> [Overlay] {
-        var overlays: [Overlay] = []
-        if settings.indicators.contains(.ma) {
-            overlays.append(Overlay(label: "MA7", color: Color(dark: 0xE5C07B, light: 0xB8860B), values: ChartMath.sma(closes, 7)))
-            overlays.append(Overlay(label: "MA25", color: Color(dark: 0xC586C0, light: 0xA347A0), values: ChartMath.sma(closes, 25)))
-            overlays.append(Overlay(label: "MA99", color: Color(dark: 0x3794FF, light: 0x0A6FD6), values: ChartMath.sma(closes, 99)))
-        }
-        if settings.indicators.contains(.ema) {
-            overlays.append(Overlay(label: "EMA12", color: Color(dark: 0x4EC9B0, light: 0x16825D), values: ChartMath.ema(closes, 12)))
-            overlays.append(Overlay(label: "EMA26", color: Color(dark: 0xCE9178, light: 0xB5532A), values: ChartMath.ema(closes, 26)))
-        }
-        if settings.indicators.contains(.vwap), !interval.isDaily {
-            overlays.append(Overlay(label: "VWAP", color: Color.primary.opacity(0.75), values: ChartMath.vwap(layout.window)))
-        }
-        return overlays
     }
 
     // MARK: Axes
@@ -750,13 +863,17 @@ private struct ChartRenderer {
             // Even spacing on screen; the labels are whatever prices fall there.
             prices = stride(from: layout.mainPane.minY + 30, to: layout.mainPane.maxY, by: 56).map { layout.price(atY: $0) }
         } else {
-            let top = layout.price(atY: layout.mainPane.minY), bottom = layout.price(atY: layout.mainPane.maxY)
+            // Round steps of price, or of percent change when the axis shows that.
+            let base = layout.percentBase
+            let scaled: (Double) -> Double = { price in base.map { price / $0 - 1 } ?? price }
+            let edges = [scaled(layout.price(atY: layout.mainPane.minY)), scaled(layout.price(atY: layout.mainPane.maxY))]
+            let top = max(edges[0], edges[1]), bottom = min(edges[0], edges[1])
             let step = Self.niceStep((top - bottom) / max(Double(layout.mainPane.height / 56), 2))
             if step > 0 {
-                var price = (bottom / step).rounded(.up) * step
-                while price <= top {
-                    prices.append(price)
-                    price += step
+                var value = (bottom / step).rounded(.up) * step
+                while value <= top {
+                    prices.append(base.map { $0 * (1 + value) } ?? value)
+                    value += step
                 }
             }
         }
@@ -764,7 +881,8 @@ private struct ChartRenderer {
             let y = layout.y(price).rounded() + 0.5
             guard y > layout.mainPane.minY + 6, y < layout.mainPane.maxY - 4 else { continue }
             context.stroke(horizontal(y), with: .color(grid), lineWidth: 1)
-            axisLabel(HLFormat.price(price, decimals: decimals), y: y, in: &context)
+            let label = layout.percentBase.map { HLFormat.percent(price / $0 - 1) } ?? HLFormat.price(price, decimals: decimals)
+            axisLabel(label, y: y, in: &context)
         }
         context.stroke(
             Path { path in
@@ -840,33 +958,53 @@ private struct ChartRenderer {
 
     private func drawSeries(_ context: inout GraphicsContext) {
         switch settings.style {
-        case .line, .area:
-            let values = layout.window.map { Optional($0.c) }
-            if settings.style == .area {
-                var fill = Path()
-                var started = false
-                for index in layout.range {
-                    guard let candle = layout.candle(index) else { continue }
-                    let point = CGPoint(x: layout.x(index), y: layout.y(candle.c))
-                    if started {
-                        fill.addLine(to: point)
-                    } else {
-                        fill.move(to: CGPoint(x: point.x, y: layout.mainPane.maxY))
-                        fill.addLine(to: point)
-                        started = true
-                    }
+        case .line, .step, .area, .baseline:
+            var points: [CGPoint] = []
+            points.reserveCapacity(layout.range.count)
+            for index in layout.range {
+                guard let candle = layout.candle(index) else { continue }
+                points.append(CGPoint(x: layout.x(index), y: layout.y(candle.c)))
+            }
+            guard let first = points.first, let last = points.last else { return }
+            var trace = Path()
+            trace.move(to: first)
+            for (previous, point) in zip(points, points.dropFirst()) {
+                if settings.style == .step { trace.addLine(to: CGPoint(x: point.x, y: previous.y)) }
+                trace.addLine(to: point)
+            }
+            /// The trace closed down (or up) to a level, for filling.
+            func closed(at y: CGFloat) -> Path {
+                var path = trace
+                path.addLine(to: CGPoint(x: last.x, y: y))
+                path.addLine(to: CGPoint(x: first.x, y: y))
+                path.closeSubpath()
+                return path
+            }
+            let lineStyle = StrokeStyle(lineWidth: 1.5, lineJoin: .round)
+            if settings.style == .baseline {
+                // Green above the middle of the pane and red below it: each half is the same trace, clipped.
+                let baseY = layout.priceZone.midY.rounded() + 0.5
+                let halves = [
+                    (CGRect(x: 0, y: layout.mainPane.minY, width: layout.plot.width, height: baseY - layout.mainPane.minY), layout.isInverted ? down : up),
+                    (CGRect(x: 0, y: baseY, width: layout.plot.width, height: layout.mainPane.maxY - baseY), layout.isInverted ? up : down),
+                ]
+                for (frame, color) in halves {
+                    var half = context
+                    half.clip(to: Path(frame))
+                    half.fill(closed(at: baseY), with: .color(color.opacity(0.14)))
+                    half.stroke(trace, with: .color(color), style: lineStyle)
                 }
-                if started, let last = layout.range.last {
-                    fill.addLine(to: CGPoint(x: layout.x(last), y: layout.mainPane.maxY))
-                    fill.closeSubpath()
-                    context.fill(fill, with: .linearGradient(
+                context.stroke(horizontal(baseY), with: .color(Term.foreground.opacity(0.4)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            } else {
+                if settings.style == .area {
+                    context.fill(closed(at: layout.mainPane.maxY), with: .linearGradient(
                         Gradient(colors: [Term.accent.opacity(0.32), Term.accent.opacity(0.02)]),
                         startPoint: CGPoint(x: 0, y: layout.priceZone.minY),
                         endPoint: CGPoint(x: 0, y: layout.mainPane.maxY)
                     ))
                 }
+                context.stroke(trace, with: .color(Term.accent), style: lineStyle)
             }
-            stroke(values, color: Term.accent, width: 1.5, y: layout.y, in: &context)
 
         case .bars:
             let tick = max((layout.pitch * 0.36).rounded(), 1)
@@ -890,11 +1028,8 @@ private struct ChartRenderer {
             for index in layout.range {
                 guard let candle = layout.candle(index) else { continue }
                 let x = layout.x(index).rounded()
-                let top = layout.y(max(candle.o, candle.c))
-                let bottom = layout.y(min(candle.o, candle.c))
-                let high = layout.y(candle.h)
-                let wick = CGRect(x: x - 0.5, y: high, width: 1, height: max(layout.y(candle.l) - high, 1))
-                let body = CGRect(x: x - bodyWidth / 2, y: top, width: bodyWidth, height: max(bottom - top, 1))
+                let wick = span(candle.h, candle.l, x: x - 0.5, width: 1)
+                let body = span(candle.o, candle.c, x: x - bodyWidth / 2, width: bodyWidth)
                 if candle.c >= candle.o {
                     rising.addRect(wick)
                     rising.addRect(body)
@@ -912,10 +1047,8 @@ private struct ChartRenderer {
                 let rises = candle.c >= candle.o
                 let color = rises ? up : down
                 let x = layout.x(index).rounded()
-                let top = layout.y(max(candle.o, candle.c))
-                let bottom = layout.y(min(candle.o, candle.c))
-                let wick = CGRect(x: x - 0.5, y: layout.y(candle.h), width: 1, height: max(layout.y(candle.l) - layout.y(candle.h), 1))
-                let body = CGRect(x: x - bodyWidth / 2, y: top, width: bodyWidth, height: max(bottom - top, 1))
+                let wick = span(candle.h, candle.l, x: x - 0.5, width: 1)
+                let body = span(candle.o, candle.c, x: x - bodyWidth / 2, width: bodyWidth)
                 context.fill(Path(wick), with: .color(color))
                 if settings.style == .hollow, rises, bodyWidth >= 3 {
                     context.fill(Path(body), with: .color(Term.background))
@@ -927,14 +1060,18 @@ private struct ChartRenderer {
         }
     }
 
-    private func drawBands(_ bands: (upper: [Double?], lower: [Double?]), in context: inout GraphicsContext) {
-        let color = Color(dark: 0x6A9FB5, light: 0x3F7F99)
+    /// The bar between two prices, whichever way up the axis is.
+    private func span(_ a: Double, _ b: Double, x: CGFloat, width: CGFloat) -> CGRect {
+        let first = layout.y(a), second = layout.y(b)
+        return CGRect(x: x, y: min(first, second), width: width, height: max(abs(second - first), 1))
+    }
+
+    private func drawBand(_ band: ChartSeries.Band, in context: inout GraphicsContext) {
         var fill = Path()
         var lowerPoints: [CGPoint] = []
         var started = false
         for index in layout.range {
-            let position = index - layout.base
-            guard bands.upper.indices.contains(position), let upper = bands.upper[position], let lower = bands.lower[position] else { continue }
+            guard let upper = value(band.upper, index), let lower = value(band.lower, index) else { continue }
             let point = CGPoint(x: layout.x(index), y: layout.y(upper))
             if started { fill.addLine(to: point) } else { fill.move(to: point); started = true }
             lowerPoints.append(CGPoint(x: layout.x(index), y: layout.y(lower)))
@@ -942,15 +1079,114 @@ private struct ChartRenderer {
         if started {
             for point in lowerPoints.reversed() { fill.addLine(to: point) }
             fill.closeSubpath()
-            context.fill(fill, with: .color(color.opacity(0.07)))
+            context.fill(fill, with: .color(band.color.opacity(0.07)))
         }
-        stroke(bands.upper, color: color.opacity(0.8), y: layout.y, in: &context)
-        stroke(bands.lower, color: color.opacity(0.8), y: layout.y, in: &context)
+        stroke(band.upper, color: band.color.opacity(0.8), y: layout.y, in: &context)
+        stroke(band.lower, color: band.color.opacity(0.8), y: layout.y, in: &context)
+        if let middle = band.middle { stroke(middle, color: band.color.opacity(0.45), y: layout.y, in: &context) }
+    }
+
+    /// Volume by price for the candles on screen, as bars growing in from the right. Each candle's volume
+    /// is spread evenly over the prices it traded through; the busiest price is marked across the pane.
+    private func drawVolumeProfile(_ context: inout GraphicsContext) {
+        let zone = layout.priceZone
+        let rows = max(Int(zone.height / 6), 8)
+        var bought = [Double](repeating: 0, count: rows), sold = bought
+        for index in layout.range {
+            guard let candle = layout.candle(index), candle.v > 0 else { continue }
+            let x = layout.x(index)
+            guard x >= layout.plot.minX, x <= layout.plot.maxX else { continue }
+            let a = layout.y(candle.h), b = layout.y(candle.l)
+            let first = Int(((min(a, b) - zone.minY) / zone.height * CGFloat(rows)).rounded(.down))
+            let last = Int(((max(a, b) - zone.minY) / zone.height * CGFloat(rows)).rounded(.down))
+            let from = max(first, 0), through = min(last, rows - 1)
+            guard from <= through else { continue }
+            let share = candle.v / Double(last - first + 1)
+            for row in from...through {
+                if candle.c >= candle.o { bought[row] += share } else { sold[row] += share }
+            }
+        }
+        var peak = 0.0, peakRow = 0
+        for row in 0..<rows where bought[row] + sold[row] > peak {
+            peak = bought[row] + sold[row]
+            peakRow = row
+        }
+        guard peak > 0 else { return }
+        let reach = layout.plot.width * 0.24, rowHeight = zone.height / CGFloat(rows)
+        var rising = Path(), falling = Path()
+        for row in 0..<rows where bought[row] + sold[row] > 0 {
+            let y = zone.minY + CGFloat(row) * rowHeight
+            let buyWidth = CGFloat(bought[row] / peak) * reach, sellWidth = CGFloat(sold[row] / peak) * reach
+            let height = max(rowHeight - 1, 1)
+            rising.addRect(CGRect(x: layout.plot.maxX - buyWidth, y: y, width: buyWidth, height: height))
+            falling.addRect(CGRect(x: layout.plot.maxX - buyWidth - sellWidth, y: y, width: sellWidth, height: height))
+        }
+        context.fill(rising, with: .color(up.opacity(0.22)))
+        context.fill(falling, with: .color(down.opacity(0.22)))
+        let peakY = (zone.minY + (CGFloat(peakRow) + 0.5) * rowHeight).rounded() + 0.5
+        context.stroke(horizontal(peakY), with: .color(Term.accent.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+        context.draw(
+            Text("POC \(HLFormat.price(layout.price(atY: peakY), decimals: decimals))").font(labelFont).foregroundStyle(Term.accent),
+            at: CGPoint(x: layout.plot.maxX - 6, y: peakY - 8), anchor: .trailing
+        )
+    }
+
+    /// The cloud between the two leading spans, green where the first is on top, and the three lines over it.
+    private func drawIchimoku(_ cloud: ChartMath.Ichimoku, in context: inout GraphicsContext) {
+        var bullish = Path(), bearish = Path()
+        for index in layout.range.lowerBound..<(layout.range.upperBound + cloud.shift - 1) {
+            guard let a0 = value(cloud.spanA, index), let b0 = value(cloud.spanB, index),
+                  let a1 = value(cloud.spanA, index + 1), let b1 = value(cloud.spanB, index + 1) else { continue }
+            let x0 = layout.x(index), x1 = layout.x(index + 1)
+            let corners = [
+                CGPoint(x: x0, y: layout.y(a0)), CGPoint(x: x1, y: layout.y(a1)),
+                CGPoint(x: x1, y: layout.y(b1)), CGPoint(x: x0, y: layout.y(b0)),
+            ]
+            if a0 + a1 >= b0 + b1 { bullish.addLines(corners); bullish.closeSubpath() } else { bearish.addLines(corners); bearish.closeSubpath() }
+        }
+        context.fill(bullish, with: .color(up.opacity(0.1)))
+        context.fill(bearish, with: .color(down.opacity(0.1)))
+        stroke(cloud.spanA, color: up.opacity(0.55), y: layout.y, extend: cloud.shift, in: &context)
+        stroke(cloud.spanB, color: down.opacity(0.55), y: layout.y, extend: cloud.shift, in: &context)
+        stroke(cloud.lagging, color: ChartTint.purple.opacity(0.6), y: layout.y, in: &context)
+        stroke(cloud.conversion, color: ChartTint.blue, y: layout.y, in: &context)
+        stroke(cloud.base, color: ChartTint.orange, y: layout.y, in: &context)
+    }
+
+    /// One line in two colours: green while it trails under price, red while it sits over it.
+    private func drawSupertrend(_ trend: (line: [Double?], rising: [Bool]), in context: inout GraphicsContext) {
+        var rising = Path(), falling = Path()
+        for index in layout.range.dropFirst() {
+            let position = index - layout.base
+            guard position > 0, position < trend.rising.count, trend.rising[position] == trend.rising[position - 1],
+                  let from = value(trend.line, index - 1), let to = value(trend.line, index) else { continue }
+            let a = CGPoint(x: layout.x(index - 1), y: layout.y(from)), b = CGPoint(x: layout.x(index), y: layout.y(to))
+            if trend.rising[position] {
+                rising.move(to: a)
+                rising.addLine(to: b)
+            } else {
+                falling.move(to: a)
+                falling.addLine(to: b)
+            }
+        }
+        let style = StrokeStyle(lineWidth: 1.5, lineCap: .round)
+        context.stroke(rising, with: .color(up), style: style)
+        context.stroke(falling, with: .color(down), style: style)
+    }
+
+    private func drawSAR(_ stops: [Double?], in context: inout GraphicsContext) {
+        let radius = min(max(layout.pitch * 0.18, 1), 2.5)
+        var dots = Path()
+        for index in layout.range {
+            guard let stop = value(stops, index) else { continue }
+            dots.addEllipse(in: CGRect(x: layout.x(index) - radius, y: layout.y(stop) - radius, width: radius * 2, height: radius * 2))
+        }
+        context.fill(dots, with: .color(ChartTint.blue))
     }
 
     /// Marks the highest high and lowest low on screen.
     private func drawExtremes(_ context: inout GraphicsContext) {
-        guard settings.style != .line, settings.style != .area else { return }
+        guard !settings.style.usesClose else { return }
         var highest: (index: Int, price: Double)?
         var lowest: (index: Int, price: Double)?
         for index in layout.range {
@@ -962,7 +1198,7 @@ private struct ChartRenderer {
             guard let mark else { continue }
             let x = layout.x(mark.index)
             let leftSide = x > layout.plot.midX
-            let y = layout.y(mark.price) + (isHigh ? -7 : 7)
+            let y = layout.y(mark.price) + (isHigh != layout.isInverted ? -7 : 7)
             let label = HLFormat.price(mark.price, decimals: decimals)
             context.draw(
                 Text(leftSide ? "\(label) ─" : "─ \(label)").font(labelFont).foregroundStyle(Term.foreground.opacity(0.75)),
@@ -1009,22 +1245,6 @@ private struct ChartRenderer {
         }
     }
 
-    private func drawDrawings(_ pane: inout GraphicsContext) {
-        for drawing in drawings {
-            let (start, end) = layout.points(of: drawing, interval: interval)
-            var path = Path()
-            path.move(to: start)
-            path.addLine(to: end)
-            pane.stroke(path, with: .color(Self.lineColor), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-            let handles = drawing.kind == .ray ? [start] : [start, end]
-            for point in handles {
-                let dot = CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)
-                pane.fill(Path(ellipseIn: dot), with: .color(Term.background))
-                pane.stroke(Path(ellipseIn: dot), with: .color(Self.lineColor), lineWidth: 1.5)
-            }
-        }
-    }
-
     private func drawLastPrice(_ context: inout GraphicsContext, now: Date) {
         guard let last = layout.latest else { return }
         let color = last.c >= last.o ? up : down
@@ -1036,7 +1256,7 @@ private struct ChartRenderer {
         tag(HLFormat.price(last.c, decimals: decimals), fill: color, at: CGPoint(x: layout.plot.maxX + 1, y: y), anchor: .leading, in: &context)
 
         // Time left in the forming candle.
-        guard interval != .mo1 else { return }
+        guard interval != .mo1, !isReplay else { return }
         let close = Date(timeIntervalSince1970: Double(last.t + interval.milliseconds) / 1_000)
         let seconds = max(Int(close.timeIntervalSince(now)), 0)
         let text = seconds >= 86_400
@@ -1060,55 +1280,83 @@ private struct ChartRenderer {
         )
     }
 
-    private func drawRSI(_ values: [Double?], frame: CGRect, cursor: Int?, in context: inout GraphicsContext) {
-        let inner = frame.insetBy(dx: 0, dy: 6)
-        let y: (Double) -> CGFloat = { inner.minY + CGFloat((100 - $0) / 100) * inner.height }
-        for level in [30.0, 70.0] {
-            let line = y(level).rounded() + 0.5
-            context.stroke(horizontal(line), with: .color(Color.primary.opacity(0.16)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
-            axisLabel(String(format: "%.0f", level), y: line, in: &context)
-        }
-        var pane = context
-        pane.clip(to: Path(frame))
-        stroke(values, color: Color(dark: 0xC586C0, light: 0xA347A0), y: y, in: &pane)
-        let shown = value(values, cursor ?? layout.lastVisible)
-        paneFrame(frame, title: "RSI 14  " + (shown.map { String(format: "%.1f", $0) } ?? "–"), in: &context)
-    }
-
-    private func drawMACD(
-        _ series: (macd: [Double?], signal: [Double?], histogram: [Double?]),
-        frame: CGRect, cursor: Int?, in context: inout GraphicsContext
-    ) {
-        let inner = frame.insetBy(dx: 0, dy: 8)
-        var extent = 0.0
-        for index in layout.range {
-            for values in [series.macd, series.signal, series.histogram] {
-                if let value = value(values, index) { extent = max(extent, abs(value)) }
+    /// Any oscillator: its guide levels, histogram and lines on a scale of its own, with the readout in the title.
+    private func drawPane(_ study: ChartSeries.Pane, frame: CGRect, cursor: Int?, in context: inout GraphicsContext) {
+        let format: (Double) -> String = { value in
+            switch study.format {
+            case .price: HLFormat.price(value, decimals: decimals)
+            case .compact: HLFormat.compact(value)
+            case let .plain(places): String(format: "%.\(places)f", value)
             }
         }
-        guard extent > 0 else {
-            paneFrame(frame, title: "MACD 12 26 9", in: &context)
+        let at = cursor ?? layout.lastVisible
+        var readout: [String] = study.lines.map { line in
+            (line.label.isEmpty ? "" : line.label + " ") + (value(line.values, at).map(format) ?? "–")
+        }
+        if let bars = study.histogram { readout.append(value(bars, at).map(format) ?? "–") }
+        let title = study.title + "  " + readout.joined(separator: "  ")
+
+        var low = Double.infinity, high = -Double.infinity
+        switch study.scale {
+        case let .fixed(range):
+            low = range.lowerBound
+            high = range.upperBound
+        case .auto, .centered:
+            for index in layout.range {
+                for line in study.lines {
+                    if let value = value(line.values, index) {
+                        low = min(low, value)
+                        high = max(high, value)
+                    }
+                }
+                if let value = study.histogram.flatMap({ value($0, index) }) {
+                    low = min(low, value)
+                    high = max(high, value)
+                }
+            }
+            if case .centered = study.scale {
+                let extent = max(abs(low), abs(high), study.guides.map(abs).max() ?? 0)
+                low = -extent
+                high = extent
+            }
+        }
+        guard low.isFinite, high.isFinite, high > low else {
+            paneFrame(frame, title: study.title, in: &context)
             return
         }
-        let y: (Double) -> CGFloat = { inner.midY - CGFloat($0 / extent) * inner.height / 2 }
+        let inner = frame.insetBy(dx: 0, dy: 8)
+        let y: (Double) -> CGFloat = { inner.minY + CGFloat((high - $0) / (high - low)) * inner.height }
+
+        for guide in study.guides {
+            let line = y(guide).rounded() + 0.5
+            context.stroke(horizontal(line), with: .color(Color.primary.opacity(0.16)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            axisLabel(format(guide), y: line, in: &context)
+        }
+        if study.guides.isEmpty {
+            axisLabel(format(high), y: inner.minY + 4, in: &context)
+            axisLabel(format(low), y: inner.maxY - 4, in: &context)
+        }
+
         var pane = context
         pane.clip(to: Path(frame))
-        pane.stroke(horizontal(inner.midY.rounded() + 0.5), with: .color(Color.primary.opacity(0.14)), lineWidth: 1)
-        for index in layout.range {
-            guard let bar = value(series.histogram, index) else { continue }
-            let top = min(y(bar), inner.midY), height = max(abs(y(bar) - inner.midY), 1)
-            let rect = CGRect(x: layout.x(index).rounded() - bodyWidth / 2, y: top, width: bodyWidth, height: height)
-            pane.fill(Path(rect), with: .color((bar >= 0 ? up : down).opacity(0.55)))
+        if low < 0, high > 0 {
+            pane.stroke(horizontal(y(0).rounded() + 0.5), with: .color(Color.primary.opacity(0.14)), lineWidth: 1)
         }
-        stroke(series.macd, color: Color(dark: 0x3794FF, light: 0x0A6FD6), y: y, in: &pane)
-        stroke(series.signal, color: Color(dark: 0xCE9178, light: 0xB5532A), y: y, in: &pane)
-        axisLabel(HLFormat.price(extent, decimals: decimals), y: inner.minY + 4, in: &context)
-        axisLabel(HLFormat.price(-extent, decimals: decimals), y: inner.maxY - 4, in: &context)
-        let at = cursor ?? layout.lastVisible
-        let readout = [series.macd, series.signal, series.histogram]
-            .map { value($0, at).map { HLFormat.price($0, decimals: decimals) } ?? "–" }
-            .joined(separator: "  ")
-        paneFrame(frame, title: "MACD 12 26 9  " + readout, in: &context)
+        if let bars = study.histogram {
+            let zero = y(min(max(0, low), high))
+            var rising = Path(), falling = Path()
+            for index in layout.range {
+                guard let bar = value(bars, index) else { continue }
+                let rect = CGRect(x: layout.x(index).rounded() - bodyWidth / 2, y: min(y(bar), zero), width: bodyWidth, height: max(abs(y(bar) - zero), 1))
+                if bar >= 0 { rising.addRect(rect) } else { falling.addRect(rect) }
+            }
+            pane.fill(rising, with: .color(up.opacity(0.55)))
+            pane.fill(falling, with: .color(down.opacity(0.55)))
+        }
+        for line in study.lines {
+            stroke(line.values, color: line.color, y: y, in: &pane)
+        }
+        paneFrame(frame, title: title, in: &context)
     }
 
     // MARK: Crosshair, measure, legend
@@ -1140,23 +1388,23 @@ private struct ChartRenderer {
         }
     }
 
-    private func drawMeasure(_ measure: ChartMeasure, in context: inout GraphicsContext) {
-        let x0 = layout.x(measure.startIndex), x1 = layout.x(measure.endIndex)
-        let y0 = layout.y(measure.startPrice), y1 = layout.y(measure.endPrice)
-        let rect = CGRect(x: min(x0, x1), y: min(y0, y1), width: abs(x1 - x0), height: abs(y1 - y0))
-        let rises = measure.endPrice >= measure.startPrice
+    /// A shaded box between two points with what lies between them: price change, percent, bars and time.
+    func drawMeasure(
+        from start: CGPoint, to end: CGPoint, startPrice: Double, endPrice: Double, bars: Int, in context: inout GraphicsContext
+    ) {
+        let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+        let rises = endPrice >= startPrice
         let color = rises ? up : down
         var pane = context
         pane.clip(to: Path(layout.mainPane))
         pane.fill(Path(rect), with: .color(color.opacity(0.14)))
         pane.stroke(Path(rect), with: .color(color.opacity(0.7)), lineWidth: 1)
 
-        let change = measure.endPrice - measure.startPrice
-        let bars = measure.endIndex - measure.startIndex
-        let percent = measure.startPrice > 0 ? HLFormat.percent(change / measure.startPrice) : ""
+        let change = endPrice - startPrice
+        let percent = startPrice > 0 ? HLFormat.percent(change / startPrice) : ""
         let sign = change >= 0 ? "+" : "−"
         let label = "\(sign)\(HLFormat.price(abs(change), decimals: decimals))  \(percent)  ·  \(bars) bars  \(Self.duration(Int64(abs(bars)) * interval.milliseconds))"
-        let anchorY = rises ? rect.minY - 12 : rect.maxY + 12
+        let anchorY = end.y <= start.y ? rect.minY - 12 : rect.maxY + 12
         tag(
             label, fill: color,
             at: CGPoint(x: min(max(rect.midX, 110), layout.plot.maxX - 110), y: min(max(anchorY, 12), layout.mainPane.maxY - 12)),
@@ -1164,35 +1412,59 @@ private struct ChartRenderer {
         )
     }
 
-    private func drawLegend(
-        _ index: Int, overlays: [Overlay], bands: (upper: [Double?], lower: [Double?])?, in context: inout GraphicsContext
-    ) {
+    private func drawLegend(_ index: Int, in context: inout GraphicsContext) {
         guard let candle = layout.candle(index) else { return }
         let color = candle.c >= candle.o ? up : down
+        let price: (Double?) -> String = { $0.map { HLFormat.price($0, decimals: decimals) } ?? "–" }
         var first: [(String, Color)] = []
         for (label, value) in [("O", candle.o), ("H", candle.h), ("L", candle.l), ("C", candle.c)] {
             first.append((label, .secondary))
-            first.append((HLFormat.price(value, decimals: decimals), color))
+            first.append((price(value), color))
         }
         if candle.o > 0 { first.append((HLFormat.percent(candle.c / candle.o - 1), color)) }
         first.append(("V", .secondary))
         first.append((HLFormat.compact(candle.v), Term.foreground))
         if settings.style == .heikinAshi { first.append(("HA", .secondary)) }
         if layout.isLog { first.append(("LOG", .secondary)) }
+        if layout.percentBase != nil { first.append(("%", .secondary)) }
+        if layout.isInverted { first.append(("INV", .secondary)) }
+        if isReplay { first.append(("REPLAY", PowderPalette.cautionAmber)) }
         legendLine(first, y: 12, in: &context)
 
-        var second: [(String, Color)] = []
-        for overlay in overlays {
-            second.append((overlay.label, .secondary))
-            second.append((value(overlay.values, index).map { HLFormat.price($0, decimals: decimals) } ?? "–", overlay.color))
+        // Each study keeps its label and values together; a full row wraps to the next.
+        var groups: [[(String, Color)]] = series.lines.map { line in
+            [(line.label, .secondary), (price(value(line.values, index)), line.color)]
         }
-        if let bands {
-            let bandColor = Color(dark: 0x6A9FB5, light: 0x3F7F99)
-            second.append(("BB", .secondary))
-            second.append((value(bands.upper, index).map { HLFormat.price($0, decimals: decimals) } ?? "–", bandColor))
-            second.append((value(bands.lower, index).map { HLFormat.price($0, decimals: decimals) } ?? "–", bandColor))
+        for band in series.bands {
+            groups.append([(band.label, .secondary), (price(value(band.upper, index)), band.color), (price(value(band.lower, index)), band.color)])
         }
-        if !second.isEmpty { legendLine(second, y: 28, in: &context) }
+        if let trend = series.supertrend {
+            let rising = trend.rising.indices.contains(index - layout.base) ? trend.rising[index - layout.base] : true
+            groups.append([("ST", .secondary), (price(value(trend.line, index)), rising ? up : down)])
+        }
+        if let stops = series.sar { groups.append([("SAR", .secondary), (price(value(stops, index)), ChartTint.blue)]) }
+        if let cloud = series.ichimoku {
+            groups.append([
+                ("ICHI", .secondary), (price(value(cloud.conversion, index)), ChartTint.blue), (price(value(cloud.base, index)), ChartTint.orange),
+                (price(value(cloud.spanA, index)), up), (price(value(cloud.spanB, index)), down),
+            ])
+        }
+        var x: CGFloat = 10, y: CGFloat = 28
+        for group in groups {
+            let texts = group.map { context.resolve(Text($0.0).font(labelFont).foregroundStyle($0.1)) }
+            let widths = texts.map { $0.measure(in: CGSize(width: 400, height: 40)).width }
+            let width = widths.reduce(0, +) + CGFloat(widths.count) * 6
+            if x > 10, x + width > layout.plot.maxX - 6 {
+                x = 10
+                y += 15
+            }
+            guard y < layout.mainPane.maxY - 20 else { return }
+            for (text, width) in zip(texts, widths) {
+                context.draw(text, at: CGPoint(x: x, y: y), anchor: .leading)
+                x += width + 6
+            }
+            x += 4
+        }
     }
 
     private func legendLine(_ parts: [(String, Color)], y: CGFloat, in context: inout GraphicsContext) {
@@ -1215,11 +1487,13 @@ private struct ChartRenderer {
 
     /// Polyline through the visible part of a window-indexed series, broken where values are missing.
     private func stroke(
-        _ values: [Double?], color: Color, width: CGFloat = 1, y: (Double) -> CGFloat, in context: inout GraphicsContext
+        _ values: [Double?], color: Color, width: CGFloat = 1, y: (Double) -> CGFloat, extend: Int = 0,
+        in context: inout GraphicsContext
     ) {
         var path = Path()
         var isDrawing = false
-        for index in layout.range {
+        // `extend` carries on past the newest candle, for series projected ahead of it.
+        for index in layout.range.lowerBound..<(layout.range.upperBound + extend) {
             guard let value = value(values, index) else {
                 isDrawing = false
                 continue
@@ -1246,7 +1520,7 @@ private struct ChartRenderer {
     }
 
     /// A filled label, used for prices on the axis, the cursor time and the measure readout.
-    private func tag(
+    func tag(
         _ string: String, fill: Color, text textColor: Color = PowderPalette.graphite,
         at point: CGPoint, anchor: UnitPoint, in context: inout GraphicsContext
     ) {
@@ -1258,7 +1532,7 @@ private struct ChartRenderer {
         context.draw(text, at: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2), anchor: .center)
     }
 
-    private func timeLabel(_ milliseconds: Int64, date: Bool, time: Bool) -> String {
+    func timeLabel(_ milliseconds: Int64, date: Bool, time: Bool) -> String {
         let value = Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
         var parts: [String] = []
         if date {

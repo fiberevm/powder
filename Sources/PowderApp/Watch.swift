@@ -111,6 +111,10 @@ final class WatchlistStore: ObservableObject {
     /// Adds the market, or removes it if it is already there. Returns whether it is now watched.
     @discardableResult
     func toggle(_ market: MarketRef) -> Bool {
+        Track.event("watchlist_changed", [
+            "added": !items.contains { $0.id == market.id }, "asset": market.symbol,
+            "venue": (market.mint == nil ? Track.Venue.hyperliquid : .solana).rawValue,
+        ])
         if let index = items.firstIndex(where: { $0.id == market.id }) {
             items.remove(at: index)
             save()
@@ -318,6 +322,9 @@ final class AlertStore: ObservableObject {
     func add(_ market: MarketRef, price: Double, current: Double? = nil) -> PriceAlert? {
         guard price > 0, let now = current ?? self.price(of: market) else { return nil }
         let alert = PriceAlert(market: market, price: price, isAbove: price >= now)
+        Track.event("alert_created", [
+            "asset": market.symbol, "venue": (market.mint == nil ? Track.Venue.hyperliquid : .solana).rawValue, "above": alert.isAbove,
+        ])
         alerts.insert(alert, at: 0)
         save()
         updateWatching()

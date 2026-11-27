@@ -232,17 +232,38 @@ final class SolanaWalletProvider: ObservableObject {
     /// The result shows in the wallet as soon as the swap is priced; if it then fails, the wallet is put back.
     func swap(
         walletID: UUID, input: String, output: String, amount: UInt64, outputDecimals: Int? = nil, pool: SolanaPool? = nil,
-        onStage: @MainActor (SolanaSwapStage) -> Void = { _ in }
+        symbol: String? = nil, onStage: @MainActor (SolanaSwapStage) -> Void = { _ in }
     ) async throws -> SolanaFill {
         guard let wallet = wallet(walletID) else { throw WalletError.missingKey }
         guard amount > 0 else { throw WalletError.sizeTooSmall }
         let before = balances[walletID]
         let costsBefore = costs
+        // Tracking is put together only once the swap has landed or failed: nothing of it runs ahead of the order.
+        func describe() -> [String: Any?] {
+            // A swap is a buy of the token when it is paid for in SOL or a stablecoin, a sell of what is paid otherwise.
+            let isBuy = input == SolanaRPC.wrappedSOL || SolanaTokens.stablecoins.contains(input)
+            let asset = isBuy ? output : input
+            return [
+                "venue": Track.Venue.solana.rawValue, "kind": pool == nil ? "routed" : "pool", "side": isBuy ? "buy" : "sell", "order_type": "market",
+                "asset": symbol ?? prices[asset]?.symbol, "mint": asset, "paid_with": prices[isBuy ? input : output]?.symbol,
+                "pool": pool?.address, "exchange": pool?.exchange,
+            ]
+        }
         do {
-            return try await perform(
+            let fill = try await perform(
                 wallet: wallet, input: input, output: output, amount: amount, outputDecimals: outputDecimals, pool: pool, before: before, onStage: onStage
             )
+            // Volume in dollars, from whichever side of the swap has a known price.
+            let decimals = [input: before?.holding(input)?.decimals, output: outputDecimals ?? before?.holding(output)?.decimals]
+            let volume = usd(input, raw: fill.paid, decimals: decimals[input] ?? nil) ?? usd(output, raw: fill.received, decimals: decimals[output] ?? nil)
+            var tracked = describe()
+            tracked.merge(["volume_usd": volume, "latency_ms": fill.milliseconds, "landed_by": fill.usedNozomi ? "nozomi" : "rpc"]) { $1 }
+            Track.event("trade", tracked)
+            return fill
         } catch {
+            var tracked = describe()
+            tracked["reason"] = String(error.localizedDescription.prefix(120))
+            Track.event("order_failed", tracked)
             // Shown ahead of the chain, and it did not happen.
             expected[walletID] = nil
             if let before { balances[walletID] = before }
@@ -251,6 +272,14 @@ final class SolanaWalletProvider: ObservableObject {
             Task { await refresh(walletID) }
             throw error
         }
+    }
+
+    /// What an amount of a token is worth, when its price is known: SOL and the stablecoins always are once prices have loaded.
+    private func usd(_ mint: String, raw: UInt64, decimals: Int?) -> Double? {
+        if mint == SolanaRPC.wrappedSOL { return solPrice.map { Double(raw) / 1e9 * $0 } }
+        if SolanaTokens.stablecoins.contains(mint) { return Double(raw) / 1e6 }
+        guard let decimals, let price = prices[mint]?.price, price > 0 else { return nil }
+        return Double(raw) / pow(10, Double(decimals)) * price
     }
 
     /// Moves the wallet's shown balances to what a priced swap will leave, and its cost for the token with them.
@@ -295,6 +324,62 @@ final class SolanaWalletProvider: ObservableObject {
         }
     }
 
+    // MARK: Swaps priced ahead of the keypress
+
+    /// A swap already priced and built, waiting to be signed.
+    private struct PreparedSwap {
+        let transaction: SolanaTransaction
+        let quote: SolanaQuote
+        let at: ContinuousClock.Instant
+    }
+
+    private var prepared: [String: PreparedSwap] = [:]
+    private var preparing: Set<String> = []
+    /// How old a prepared swap may be when it is sent. Its price can have moved by then; the slippage limit
+    /// written into it still holds, so a stale one fails instead of filling badly.
+    private static let preparedLifetime: Duration = .seconds(12)
+
+    private static func swapKey(wallet: SolanaWallet, input: String, output: String, amount: UInt64, pool: SolanaPool?, usesTip: Bool) -> String {
+        let settings = wallet.settings
+        return "\(wallet.id)|\(input)|\(output)|\(amount)|\(pool?.address ?? "")|\(settings.slippageBps)|\(usesTip ? settings.tipLamports : 0)|\(settings.priorityLamports)"
+    }
+
+    /// Prices the swap and builds its transaction, tip included, ready to sign.
+    private static func build(
+        wallet: SolanaWallet, input: String, output: String, amount: UInt64, pool: SolanaPool?, usesTip: Bool
+    ) async throws -> PreparedSwap {
+        let settings = wallet.settings
+        // A route with many accounts can leave no room for the tip; a tighter one is asked for once.
+        for maxAccounts in [56, 36] {
+            let quote = try await Jupiter.quote(input: input, output: output, amount: amount, slippageBps: settings.slippageBps, maxAccounts: maxAccounts, pool: pool)
+            let raw = try await Jupiter.transaction(for: quote, owner: wallet.address, priorityLamports: settings.priorityLamports)
+            var transaction = try SolanaTransaction(raw)
+            do {
+                if usesTip { try transaction.addTransfer(lamports: settings.tipLamports, to: Nozomi.randomTipAccount()) }
+                return PreparedSwap(transaction: transaction, quote: quote, at: ContinuousClock.now)
+            } catch SolanaError.tooLarge {
+                continue
+            }
+        }
+        throw SolanaError.tooLarge
+    }
+
+    /// Called by a ticket while it is in use, for the swap its buttons would send right now: the route is priced
+    /// and the transaction built in the background, so pressing the button only has to sign and send.
+    func prepare(walletID: UUID, input: String, output: String, amount: UInt64, pool: SolanaPool?) async {
+        guard amount > 0, let wallet = wallet(walletID) else { return }
+        let usesTip = Nozomi.hasKey
+        let key = Self.swapKey(wallet: wallet, input: input, output: output, amount: amount, pool: pool, usesTip: usesTip)
+        guard !preparing.contains(key) else { return }
+        preparing.insert(key)
+        defer { preparing.remove(key) }
+        guard let fresh = try? await Self.build(wallet: wallet, input: input, output: output, amount: amount, pool: pool, usesTip: usesTip) else { return }
+        prepared[key] = fresh
+        // Only what the ticket could send now is kept.
+        let cutoff = ContinuousClock.now - Self.preparedLifetime
+        prepared = prepared.filter { $0.value.at > cutoff }
+    }
+
     private func perform(
         wallet: SolanaWallet, input: String, output: String, amount: UInt64, outputDecimals: Int?, pool: SolanaPool?,
         before: SolanaBalances?, onStage: @MainActor (SolanaSwapStage) -> Void
@@ -306,34 +391,25 @@ final class SolanaWalletProvider: ObservableObject {
         let clock = ContinuousClock()
         let started = clock.now
 
-        // A route with many accounts can leave no room for the tip; a tighter one is asked for once.
-        var transaction: SolanaTransaction?
-        var quote: SolanaQuote?
-        for maxAccounts in [56, 36] {
-            let candidate = try await Jupiter.quote(input: input, output: output, amount: amount, slippageBps: settings.slippageBps, maxAccounts: maxAccounts, pool: pool)
-            if quote == nil, transaction == nil, maxAccounts == 56 {
-                // Priced: from here the trade shows as done while it is built, sent and landed.
-                if let before {
-                    showExpected(
-                        wallet: wallet, before: before, input: input, output: output, paid: candidate.inAmount,
-                        received: candidate.outAmount, outputDecimals: outputDecimals, usesTip: nozomiKey != nil
-                    )
-                }
-                onStage(.quoted(received: candidate.outAmount))
-            }
-            let raw = try await Jupiter.transaction(for: candidate, owner: wallet.address, priorityLamports: settings.priorityLamports)
-            var built = try SolanaTransaction(raw)
-            do {
-                if nozomiKey != nil { try built.addTransfer(lamports: settings.tipLamports, to: Nozomi.randomTipAccount()) }
-                try built.sign(seed: seed)
-                transaction = built
-                quote = candidate
-                break
-            } catch SolanaError.tooLarge {
-                continue
-            }
+        // The route is normally priced and built before the key is pressed (see `prepare`), so the order itself
+        // is only signing and sending. Without a fresh one, it is priced here, as before.
+        let key = Self.swapKey(wallet: wallet, input: input, output: output, amount: amount, pool: pool, usesTip: nozomiKey != nil)
+        var ready = prepared.removeValue(forKey: key)
+        if let waiting = ready, clock.now - waiting.at > Self.preparedLifetime { ready = nil }
+        let wasPrepared = ready != nil
+        if ready == nil {
+            ready = try await Self.build(wallet: wallet, input: input, output: output, amount: amount, pool: pool, usesTip: nozomiKey != nil)
         }
-        guard let transaction, let quote else { throw SolanaError.tooLarge }
+        guard var transaction = ready?.transaction, let quote = ready?.quote else { throw SolanaError.tooLarge }
+        // From here the trade shows as done while it is sent and landed.
+        if let before {
+            showExpected(
+                wallet: wallet, before: before, input: input, output: output, paid: quote.inAmount,
+                received: quote.outAmount, outputDecimals: outputDecimals, usesTip: nozomiKey != nil
+            )
+        }
+        onStage(.quoted(received: quote.outAmount))
+        try transaction.sign(seed: seed)
         let built = clock.now
 
         if let nozomiKey {
@@ -352,7 +428,7 @@ final class SolanaWalletProvider: ObservableObject {
         }
         let total = HyperliquidExchange.milliseconds(clock.now - started)
         HyperliquidExchange.log(
-            "solana \(transaction.signature) route=\(HyperliquidExchange.milliseconds(built - started))ms"
+            "solana \(transaction.signature) route=\(wasPrepared ? "prepared" : "\(HyperliquidExchange.milliseconds(built - started))ms")"
                 + " send=\(HyperliquidExchange.milliseconds(sent - built))ms"
                 + " land=\(HyperliquidExchange.milliseconds(clock.now - sent))ms via=\(nozomiKey == nil ? "rpc" : "nozomi")"
         )

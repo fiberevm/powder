@@ -50,9 +50,8 @@ const paths = [
   },
   {
     title: "Solana swap",
-    seen: "Shown on screen at 460 ms, once priced",
+    seen: "Shown on screen at 0 ms",
     stages: [
-      { name: "Price the route (Jupiter)", ms: 460, text: "460 ms" },
       { name: "Sign", ms: 0.05, text: "0.05 ms", ours: true },
       { name: "Send", ms: 82, text: "82 ms" },
       { name: "Land in a block", ms: 626, text: "626 ms" },
@@ -142,7 +141,7 @@ function renderFees() {
         return `<tr class="${rate === 0 ? "us" : ""}">
           <th scope="row">${brand(name)}</th>
           <td class="rate">${rate}%</td>
-          <td class="bar"><span style="width:${highest ? (rate / highest) * 100 : 0}%"></span></td>
+          <td class="bar"><span style="width:${rate === 0 ? "3px" : (rate / highest) * 100 + "%"}"></span></td>
           <td class="cost">${dollars(cost, cost < 100 && cost > 0 ? 2 : 0)}</td>
         </tr>`;
       })

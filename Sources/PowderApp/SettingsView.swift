@@ -705,6 +705,7 @@ private struct DataSettingsPane: View {
     @State private var hasGoldRushKey = LiquidationFeed.hasKey
     @EnvironmentObject private var liquidations: LiquidationsModel
     @AppStorage(SolanaRPC.endpointKey) private var rpc = ""
+    @State private var sharesUsage = Track.isEnabled
 
     var body: some View {
         ScrollView {
@@ -772,6 +773,26 @@ private struct DataSettingsPane: View {
                 SectionHeading(title: "Solana RPC", subtitle: "Balances and confirmations.")
                 SettingRow(label: "Address", note: "Empty uses the public api.mainnet-beta.solana.com, which is rate limited.") {
                     TermTextField(placeholder: SolanaRPC.defaultEndpoint, text: $rpc)
+                }
+
+                SectionHeading(title: "Usage data", subtitle: "Helps decide what to build next.")
+                SettingRow(
+                    label: "Share usage",
+                    note: "Which markets you open, what you trade and its dollar size, and which parts of Powder you use, sent to PostHog under a random id. Never your wallet addresses, keys, web addresses or what you type to the assistant."
+                ) {
+                    HStack(spacing: 0) {
+                        ForEach([true, false], id: \.self) { choice in
+                            Button {
+                                Track.isEnabled = choice
+                                sharesUsage = choice
+                            } label: {
+                                InverseLabel(text: choice ? "ON" : "OFF", isActive: sharesUsage == choice)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .overlay(Rectangle().stroke(Term.rule, lineWidth: 1))
                 }
             }
             .padding(24)

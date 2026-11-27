@@ -145,15 +145,40 @@ struct PerpsView: View {
         let shown = HLFormat.price(price, decimals: model.priceDecimals)
         var items: [DropdownItem] = []
 
-        // Lines under the pointer come first: what is there can be taken away.
+        // The drawing under the pointer comes first, then lines there: what is there can be changed or taken away.
+        if let id = request.drawing, let drawing = model.drawings.first(where: { $0.id == id }) {
+            items.append(DropdownItem("Delete \(drawing.kind.title.lowercased())", id: "drawing-delete", detail: "⌫") {
+                closeChartMenu()
+                model.removeDrawing(id)
+            })
+            items.append(DropdownItem("Duplicate", id: "drawing-duplicate") {
+                closeChartMenu()
+                model.duplicateDrawing(id)
+            })
+            for (index, tint) in ChartDrawing.tints.enumerated() {
+                items.append(DropdownItem(
+                    "Colour: \(tint.name)", id: "drawing-colour-\(index)", isSelected: (drawing.color ?? 0) == index, startsSection: index == 0
+                ) {
+                    closeChartMenu()
+                    model.setDrawingColor(id, to: index)
+                })
+            }
+        }
+        let drawingItems = items.count
         for order in restingOrders where abs(order.price - price) <= request.tolerance {
-            items.append(DropdownItem("Cancel \(order.isBuy ? "buy" : "sell") \(HLWire.number(order.size)) at \(HLFormat.price(order.price, decimals: model.priceDecimals))", id: "cancel:\(order.id)") {
+            items.append(DropdownItem(
+                "Cancel \(order.isBuy ? "buy" : "sell") \(HLWire.number(order.size)) at \(HLFormat.price(order.price, decimals: model.priceDecimals))",
+                id: "cancel:\(order.id)", startsSection: items.count == drawingItems && drawingItems > 0
+            ) {
                 closeChartMenu()
                 cancel(order)
             })
         }
         for alert in alerts.alerts(for: marketRef) where abs(alert.price - price) <= request.tolerance {
-            items.append(DropdownItem("Remove alert at \(HLFormat.price(alert.price, decimals: model.priceDecimals))", id: "alert:\(alert.id)") {
+            items.append(DropdownItem(
+                "Remove alert at \(HLFormat.price(alert.price, decimals: model.priceDecimals))",
+                id: "alert:\(alert.id)", startsSection: items.count == drawingItems && drawingItems > 0
+            ) {
                 closeChartMenu()
                 alerts.remove(alert.id)
             })
@@ -289,7 +314,7 @@ struct PerpsView: View {
             TermRule()
             PerpChart(
                 model: model,
-                candles: model.candles,
+                candles: model.chartCandles,
                 cursorTime: model.cursorTime,
                 pitch: model.candlePitch,
                 offset: model.chartOffset,
@@ -302,6 +327,9 @@ struct PerpsView: View {
                 levels: chartLevels,
                 drawings: model.drawings,
                 drawTool: model.drawTool,
+                selectedDrawing: model.selectedDrawing,
+                isReplay: model.replayTime != nil,
+                snapshotRequest: model.snapshotRequest,
                 isLoadingHistory: model.isLoadingHistory
             )
             .equatable()
@@ -535,12 +563,28 @@ private struct ChartHeader: View {
             )
             .help("Chart type ( c cycles )")
 
-            TermDropdown("Indicators", items: indicatorItems, minWidth: 210)
+            TermDropdown(indicatorCount > 0 ? "Indicators \(indicatorCount)" : "Indicators", items: indicatorItems, minWidth: 250)
 
-            TermDropdown(model.drawTool.map { "Draw: \($0.title)" } ?? "Draw", items: drawItems, minWidth: 190)
-                .help("Pick a tool, then drag on the chart ( d arms the trend line ). ⌥-click a line to remove it.")
+            TermDropdown(model.drawTool.map { "Draw: \($0.title)" } ?? "Draw", items: drawItems, minWidth: 220)
+                .help("Pick a tool, then drag on the chart ( d arms the trend line ). Click a drawing to select it, drag it or its handles to change it, ⌫ deletes it.")
+
+            TermDropdown(scaleTitle, items: scaleItems, minWidth: 170)
+                .help("Price scale: logarithmic, percent change, inverted")
+
+            TermDropdown("Tools", items: toolItems, minWidth: 210)
 
             Spacer(minLength: 0)
+
+            if model.replayTime != nil {
+                HStack(spacing: 0) {
+                    InverseLabel(text: "REPLAY", color: PowderPalette.cautionAmber, textColor: PowderPalette.graphite)
+                    replayButton("◂", help: "Back one candle ( , )") { model.stepReplay(-1) }
+                    replayButton(model.isReplayPlaying ? "❚❚" : "▶", help: "Play or pause ( space )") { model.toggleReplayPlayback() }
+                    replayButton("▸", help: "Forward one candle ( . )") { model.stepReplay(1) }
+                    replayButton("✕", help: "Return to live ( esc )") { model.stopReplay() }
+                }
+                .fixedSize()
+            }
 
             if !model.isAutoScaled {
                 Button {
@@ -572,26 +616,67 @@ private struct ChartHeader: View {
         Self.favorites.contains(model.interval) ? Self.favorites : Self.favorites + [model.interval]
     }
 
+    private func replayButton(_ text: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            InverseLabel(text: text, isActive: false)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var indicatorCount: Int { model.chartSettings.indicators.count }
+
     private var drawItems: [DropdownItem] {
         var items = DrawTool.allCases.map { tool in
-            DropdownItem(tool.title, detail: tool == .trend ? "d" : "", isSelected: model.drawTool == tool) {
+            DropdownItem(tool.title, detail: tool == .trend ? "d" : "", isSelected: model.drawTool == tool, startsSection: tool.startsSection) {
                 model.setDrawTool(model.drawTool == tool ? nil : tool)
             }
         }
-        items.append(DropdownItem("Clear all drawings", isDisabled: !model.hasDrawings, startsSection: true) {
-            model.clearDrawings()
-        })
+        items += [
+            DropdownItem("Magnet", detail: "m", isSelected: model.chartSettings.magnet, startsSection: true) {
+                model.chartSettings.magnet.toggle()
+            },
+            DropdownItem("Lock drawings", isSelected: model.chartSettings.lockDrawings) { model.chartSettings.lockDrawings.toggle() },
+            DropdownItem("Hide drawings", isSelected: model.chartSettings.hideDrawings) { model.chartSettings.hideDrawings.toggle() },
+            DropdownItem("Undo", detail: "⌘Z", isDisabled: !model.canUndoDrawing, startsSection: true) { model.undoDrawing() },
+            DropdownItem("Redo", detail: "⇧⌘Z", isDisabled: !model.canRedoDrawing) { model.redoDrawing() },
+            DropdownItem("Clear all drawings", isDisabled: !model.hasDrawings) { model.clearDrawings() },
+        ]
         return items
     }
 
     private var indicatorItems: [DropdownItem] {
-        var items = ChartIndicator.allCases.map { indicator in
-            DropdownItem(indicator.title, isSelected: model.chartSettings.indicators.contains(indicator)) { model.toggle(indicator) }
+        let firstPane = ChartIndicator.allCases.first(where: \.isPane)
+        return ChartIndicator.allCases.map { indicator in
+            DropdownItem(
+                indicator.title, isSelected: model.chartSettings.indicators.contains(indicator), startsSection: indicator == firstPane
+            ) { model.toggle(indicator) }
         }
-        items.append(DropdownItem("Log scale", isSelected: model.chartSettings.logScale, startsSection: true) {
-            model.chartSettings.logScale.toggle()
-        })
-        return items
+    }
+
+    private var scaleTitle: String {
+        let settings = model.chartSettings
+        let marks = [settings.logScale ? "Log" : nil, settings.percentScale ? "%" : nil, settings.invertScale ? "Inv" : nil].compactMap { $0 }
+        return marks.isEmpty ? "Scale" : "Scale: " + marks.joined(separator: " ")
+    }
+
+    private var scaleItems: [DropdownItem] {
+        [
+            DropdownItem("Auto (fit to screen)", isDisabled: model.isAutoScaled) { model.resetPriceScale() },
+            DropdownItem("Logarithmic", isSelected: model.chartSettings.logScale, startsSection: true) { model.chartSettings.logScale.toggle() },
+            DropdownItem("Percent", isSelected: model.chartSettings.percentScale) { model.chartSettings.percentScale.toggle() },
+            DropdownItem("Inverted", isSelected: model.chartSettings.invertScale) { model.chartSettings.invertScale.toggle() },
+        ]
+    }
+
+    private var toolItems: [DropdownItem] {
+        [
+            model.replayTime == nil
+                ? DropdownItem("Replay from here", id: "replay") { model.startReplay() }
+                : DropdownItem("Stop replay", id: "replay", detail: "esc") { model.stopReplay() },
+            DropdownItem("Copy chart image", id: "snapshot") { model.copyChartImage() },
+        ]
     }
 }
 
@@ -1013,14 +1098,18 @@ private struct KeyHelp: View {
         ("s  ⌘D", "split right — ⇧⌘D splits down"),
         ("⌥ ← → ↑ ↓", "focus the pane in that direction (⌥ h j k l)"),
         ("[  ]", "shorter / longer candle interval"),
-        ("c", "next chart type (candles, hollow, Heikin Ashi, bars, line, area)"),
+        ("c", "next chart type (candles, hollow, Heikin Ashi, bars, line, step, area, baseline)"),
         ("←  →", "inspect candles (h l) — ⇧ jumps 10"),
         ("esc", "return to the live candle and auto scale"),
         ("-  =", "zoom chart out / in (scroll or pinch)"),
         ("drag", "pan — drag the price or time axis to rescale it"),
         ("⇧ drag", "measure price, percent, bars and time"),
         ("d", "draw a trend line: drag it out on the chart (more tools under Draw)"),
-        ("⌥ click", "remove the line under the pointer, or add a horizontal one"),
+        ("click", "select a drawing — drag it or its handles to change it, ⌫ deletes, right-click recolours"),
+        ("⌘Z  ⇧⌘Z", "undo / redo a change to the drawings"),
+        ("m", "magnet: drawing points snap to open, high, low and close"),
+        ("⌥ click", "remove the drawing under the pointer, or add a horizontal line"),
+        (",  .  space", "while replaying (Tools ▸ Replay): step back, step on, play or pause"),
         ("g", "cycle order book grouping"),
         ("o", "type an order size (⏎ or esc leaves the field)"),
         ("⇧B  ⇧S", "buy / long and sell / short at once, with the ticket's size and wallet"),
@@ -1101,6 +1190,12 @@ private struct SolanaInfoPanel: View {
                 if let pool = stats.token.pool {
                     row("POOL", "\(pool.address.prefix(6))…\(pool.address.suffix(6))")
                         .help("\(stats.token.pairName) on \(pool.exchange): \(pool.address). The chart, the trades and your swaps are this pool's alone.")
+                }
+                if let fee = stats.poolFeeLabel {
+                    row("POOL FEE", fee)
+                        .help(stats.hasDynamicFee
+                            ? "What this pool takes from each swap. It moves with the market: this is its current rate."
+                            : "What this pool takes from each swap")
                 }
                 otherPools
             } else if !SolanaAPI.hasKey {

@@ -29,6 +29,7 @@ struct SolanaTicket: View {
     /// The other side of the swap, remembered across tabs.
     @AppStorage("solana.quote") private var quoteMint = SolanaRPC.wrappedSOL
     @State private var sellFraction = 1.0
+    @State private var isHovering = false
     @State private var stopText = ""
     @State private var targetText = ""
     @State private var isSending = false
@@ -72,6 +73,45 @@ struct SolanaTicket: View {
 
     private static func round(_ value: Double) -> Double { (value * 10_000).rounded(.down) / 10_000 }
 
+    // MARK: Pricing ahead of the keypress
+
+    /// What the buy button would spend right now, in the paying currency's smallest unit; nil when it could not be sent.
+    private func buyRaw(_ wallet: SolanaWallet) -> UInt64? {
+        let amount = Double(buyText.replacingOccurrences(of: ",", with: ".")) ?? 0
+        guard amount > 0, solana.balances[wallet.id] != nil, amount <= spendable(wallet) + 1e-9 else { return nil }
+        return UInt64((amount * pow(10, Double(quote.decimals))).rounded())
+    }
+
+    /// What the sell button would sell right now, in the token's smallest unit.
+    private func sellRaw(_ wallet: SolanaWallet, _ token: SolanaToken) -> UInt64? {
+        guard let holding = solana.balances[wallet.id]?.holding(token.address), holding.raw > 0 else { return nil }
+        // All of it is sold exactly; a share is rounded down to whole units.
+        return sellFraction >= 0.999 ? holding.raw : UInt64((Double(holding.raw) * sellFraction).rounded(.down))
+    }
+
+    /// Changes whenever what the buttons would send changes, or this ticket stops being the one in use.
+    private var warmKey: String {
+        guard model.isFocusedPane || isHovering, let wallet = solana.selected, let token = model.solana else { return "" }
+        return "\(wallet.id)|\(token.savedName)|\(quote.mint)|\(buyRaw(wallet) ?? 0)|\(sellRaw(wallet, token) ?? 0)|\(wallet.settings.slippageBps)"
+    }
+
+    /// While this ticket is the one in use, the swaps its two buttons would send are kept priced and built,
+    /// refreshed every few seconds. Pressing a button then only signs and sends.
+    private func keepSwapsPriced() async {
+        guard !warmKey.isEmpty, let wallet = solana.selected, let token = model.solana else { return }
+        // Not on every keystroke of an amount being typed.
+        try? await Task.sleep(for: .milliseconds(350))
+        while !Task.isCancelled {
+            if let raw = buyRaw(wallet) {
+                await solana.prepare(walletID: wallet.id, input: quote.mint, output: token.address, amount: raw, pool: token.pool)
+            }
+            if !Task.isCancelled, let raw = sellRaw(wallet, token) {
+                await solana.prepare(walletID: wallet.id, input: token.address, output: quote.mint, amount: raw, pool: token.pool)
+            }
+            try? await Task.sleep(for: .seconds(8))
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
@@ -102,6 +142,8 @@ struct SolanaTicket: View {
             await wallets.preloadKey(id)
             await solana.refresh(id)
         }
+        .onHover { isHovering = $0 }
+        .task(id: warmKey) { await keepSwapsPriced() }
         .onChange(of: solana.selectedID) {
             message = nil
             fillDefault()
@@ -358,7 +400,7 @@ struct SolanaTicket: View {
         }
         let raw = UInt64((amount * pow(10, Double(quote.decimals))).rounded())
         let decimals = model.solanaStats?.decimals ?? solana.balances[wallet.id]?.holding(token.address)?.decimals
-        send(wallet, input: quote.mint, output: token.address, amount: raw, outputDecimals: decimals) { received in
+        send(wallet, token, input: quote.mint, output: token.address, amount: raw, outputDecimals: decimals) { received in
             let got = decimals.map { HLFormat.amount(Double(received) / pow(10, Double($0))) + " " } ?? ""
             return "Bought \(got)\(token.symbol) for \(HLWire.number(amount)) \(quote.symbol)"
         }
@@ -372,14 +414,14 @@ struct SolanaTicket: View {
         // All of it is sold exactly; a share is rounded down to whole units.
         let amount = sellFraction >= 0.999 ? holding.raw : UInt64((Double(holding.raw) * sellFraction).rounded(.down))
         let share = Int((sellFraction * 100).rounded())
-        send(wallet, input: token.address, output: quote.mint, amount: amount, outputDecimals: quote.decimals) { received in
+        send(wallet, token, input: token.address, output: quote.mint, amount: amount, outputDecimals: quote.decimals) { received in
             "Sold \(share)% of \(token.symbol) for \(HLFormat.size(Double(received) / pow(10, Double(quote.decimals)), decimals: 4)) \(quote.symbol)"
         }
     }
 
     /// The result is shown, with the ping, as soon as the swap is priced; landing confirms it or takes it back.
     private func send(
-        _ wallet: SolanaWallet, input: String, output: String, amount: UInt64, outputDecimals: Int?,
+        _ wallet: SolanaWallet, _ token: SolanaToken, input: String, output: String, amount: UInt64, outputDecimals: Int?,
         describe: @escaping (UInt64) -> String
     ) {
         guard !isSending else { return }
@@ -390,7 +432,8 @@ struct SolanaTicket: View {
             var shown = false
             do {
                 let fill = try await solana.swap(
-                    walletID: wallet.id, input: input, output: output, amount: amount, outputDecimals: outputDecimals, pool: model.solana?.pool
+                    walletID: wallet.id, input: input, output: output, amount: amount, outputDecimals: outputDecimals, pool: model.solana?.pool,
+                    symbol: token.symbol
                 ) { stage in
                     if case let .quoted(received) = stage {
                         shown = true

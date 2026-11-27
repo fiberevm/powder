@@ -119,6 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Track.event("app_closed", ["session_seconds": Launch.sinceProcessStart().map { $0 / 1_000 }])
+        Track.finish()
+    }
 }
 
 struct RootView: View {
@@ -151,6 +156,11 @@ struct RootView: View {
                 }
             }
             .task {
+                Track.event("app_opened", [
+                    "theme": router.theme.rawValue, "panes": router.groups.count, "tabs": router.groups.reduce(0) { $0 + $1.tabs.count },
+                    "wallets": router.wallets.wallets.count, "has_codex_key": SolanaAPI.hasKey, "has_nozomi_key": Nozomi.hasKey,
+                    "launch_ms": Launch.sinceProcessStart(),
+                ])
                 router.openSettings = { openSettings() }
                 router.directory.start()
                 router.ai.start(router: router)

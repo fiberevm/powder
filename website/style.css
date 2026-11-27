@@ -166,6 +166,7 @@ h3 { margin: 0 0 8px; font-size: 11.5px; text-transform: uppercase; letter-spaci
 .fees .bar span { display: block; height: 8px; border-radius: 0 3px 3px 0; background: var(--red); transition: width 0.12s; }
 .fees .cost { text-align: right; font-weight: 700; color: #fff; }
 .fees tr.us th, .fees tr.us .cost { color: var(--gold); font-weight: 700; }
+.fees tr.us .bar span { background: var(--gold); border-radius: 1px; }
 
 /* Spec sheet */
 .spec { margin: 0; border: 1px solid var(--rule); background: var(--panel); }

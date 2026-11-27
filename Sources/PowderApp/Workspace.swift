@@ -285,6 +285,7 @@ final class AppRouter: ObservableObject {
 
     /// Opens a new pane beside the active one, showing the same market.
     func split(_ axis: Axis, coin: String? = nil) {
+        Track.event("pane_split", ["axis": axis == .horizontal ? "right" : "down"])
         let source = activeGroup
         let tab = if coin == nil, let token = activeMarket?.solana {
             makeSolanaTab(token)
@@ -357,6 +358,7 @@ final class AppRouter: ObservableObject {
 
     /// Shows `coin`: its existing tab if one is open anywhere, otherwise a new tab in the active pane.
     func open(coin: String) {
+        Track.event("market_opened", ["venue": Track.Venue.hyperliquid.rawValue, "market": "\(coin)/USDC", "asset": coin, "kind": "perp"])
         for group in groups {
             if let existing = group.tabs.first(where: { $0.market?.coin == coin && $0.market?.solana == nil }) {
                 select(existing.id, in: group)
@@ -386,6 +388,7 @@ final class AppRouter: ObservableObject {
     @Published private(set) var theme: AppTheme = .dark
 
     func setTheme(_ next: AppTheme) {
+        if next != theme { Track.event("theme_changed", ["theme": next.rawValue]) }
         theme = next
         defaults.set(next.rawValue, forKey: AppTheme.key)
         NSApp?.appearance = next.appearance
@@ -396,6 +399,10 @@ final class AppRouter: ObservableObject {
 
     /// Shows a Solana token: its existing tab if open, otherwise a new tab in the active pane.
     func open(solana token: SolanaToken) {
+        Track.event("market_opened", [
+            "venue": Track.Venue.solana.rawValue, "market": token.pairName, "asset": token.symbol, "kind": "pool",
+            "mint": token.address, "pool": token.pool?.address, "exchange": token.pool?.exchange, "quote": token.pool?.quoteSymbol,
+        ])
         for group in groups {
             // A token named without a pool is at home in any tab of it; a pool only in its own.
             if let existing = group.tabs.first(where: {
@@ -460,6 +467,7 @@ final class AppRouter: ObservableObject {
     @Published private(set) var isAIOpen = false
 
     func openAI() {
+        Track.event("ai_opened")
         if isPaletteOpen { closePalette() }
         activeMarket?.isHelpOpen = false
         isAIOpen = true
@@ -473,6 +481,7 @@ final class AppRouter: ObservableObject {
     }
 
     func openPalette(commands: Bool = false) {
+        Track.event("palette_opened", ["commands": commands])
         if isAIOpen { closeAI() }
         activeMarket?.isHelpOpen = false
         paletteQuery = commands ? ">" : ""
@@ -604,6 +613,7 @@ final class AppRouter: ObservableObject {
     private var commandItems: [PaletteItem] {
         func command(_ title: String, _ key: String = "", _ icon: String, _ run: @escaping @MainActor (AppRouter) -> Void) -> PaletteItem {
             PaletteItem(id: "cmd:\(title)", title: title, detail: key, icon: icon, run: { [weak self] in
+                Track.event("command_run", ["command": title])
                 if let self { run(self) }
             })
         }
@@ -660,9 +670,22 @@ final class AppRouter: ObservableObject {
                 command("Chart: Return to Live Candle", "esc", "forward.end") { $0.activeMarket?.goLive() },
                 command("Chart: Auto Price Scale", "", "arrow.up.and.down") { $0.activeMarket?.resetPriceScale() },
                 command("Chart: Toggle Log Scale", "", "function") { $0.activeMarket?.chartSettings.logScale.toggle() },
-                command("Draw: Trend Line", "d", "line.diagonal") { $0.activeMarket?.setDrawTool(.trend) },
-                command("Draw: Ray", "", "line.diagonal.arrow") { $0.activeMarket?.setDrawTool(.ray) },
-                command("Draw: Horizontal Line", "", "line.horizontal.3") { $0.activeMarket?.setDrawTool(.horizontal) },
+                command("Chart: Toggle Percent Scale", "", "percent") { $0.activeMarket?.chartSettings.percentScale.toggle() },
+                command("Chart: Toggle Inverted Scale", "", "arrow.up.arrow.down") { $0.activeMarket?.chartSettings.invertScale.toggle() },
+                command("Chart: Copy Image", "", "camera") { $0.activeMarket?.copyChartImage() },
+                command("Replay: Start From Here", "", "backward.end") { $0.activeMarket?.startReplay() },
+                command("Replay: Play / Pause", "space", "playpause") { $0.activeMarket?.toggleReplayPlayback() },
+                command("Replay: Return to Live", "esc", "forward.end") { $0.activeMarket?.stopReplay() },
+            ]
+            items += DrawTool.allCases.map { tool in
+                command("Draw: \(tool.title)", tool == .trend ? "d" : "", "pencil.line") { $0.activeMarket?.setDrawTool(tool) }
+            }
+            items += [
+                command("Draw: Toggle Magnet", "m", "scope") { $0.activeMarket?.chartSettings.magnet.toggle() },
+                command("Draw: Lock Drawings", "", "lock") { $0.activeMarket?.chartSettings.lockDrawings.toggle() },
+                command("Draw: Hide Drawings", "", "eye.slash") { $0.activeMarket?.chartSettings.hideDrawings.toggle() },
+                command("Draw: Undo", "⌘Z", "arrow.uturn.backward") { $0.activeMarket?.undoDrawing() },
+                command("Draw: Redo", "⇧⌘Z", "arrow.uturn.forward") { $0.activeMarket?.redoDrawing() },
                 command("Draw: Clear All Drawings", "", "trash") { $0.activeMarket?.clearDrawings() },
                 command("Order Book: Cycle Grouping", "g", "list.number") { $0.activeMarket?.cycleGrouping() },
                 command("Market: Reconnect and Reload", "⌘R", "arrow.clockwise") { $0.activeMarket?.reconnect() },
@@ -690,16 +713,19 @@ final class AppRouter: ObservableObject {
 
     /// Brings the launchpad forward, opening its tab in the active pane if it was closed.
     func openLaunchpad() {
+        Track.event("board_opened", ["board": "launchpad"])
         openSingleton(where: \.isLaunchpad) { WorkspaceTab() }
     }
 
     /// Brings the all-markets table forward, opening its tab in the active pane if it was closed.
     func openMarkets() {
+        Track.event("board_opened", ["board": "markets"])
         openSingleton(where: { $0.list != nil }) { WorkspaceTab(list: MarketsModel()) }
     }
 
     /// Brings the watchlist, alerts or liquidations forward, opening its tab in the active pane if it was closed.
     func openBoard(_ board: WorkspaceTab.Board) {
+        Track.event("board_opened", ["board": board.rawValue])
         openSingleton(where: { $0.board == board }) { WorkspaceTab(board: board) }
     }
 
@@ -723,6 +749,7 @@ final class AppRouter: ObservableObject {
 
     /// Brings the trade history forward, opening its tab in the active pane if it was closed.
     func openHistory() {
+        Track.event("board_opened", ["board": "history"])
         openSingleton(where: { $0.history != nil }) { WorkspaceTab(history: HistoryModel()) }
     }
 
@@ -738,6 +765,7 @@ final class AppRouter: ObservableObject {
 
     /// Brings the all-wallets positions table forward, opening its tab in the active pane if it was closed.
     func openPositions() {
+        Track.event("board_opened", ["board": "positions"])
         openSingleton(where: { $0.positions != nil }) { WorkspaceTab(positions: PositionsModel()) }
     }
 
@@ -893,6 +921,17 @@ final class AppRouter: ObservableObject {
         objectWillChange.send()
         body()
         persist()
+        syncFocus()
+    }
+
+    /// Tells each market tab whether it is the one the trade keys act on, so only that one keeps a swap priced.
+    private func syncFocus() {
+        for group in groups {
+            for tab in group.tabs {
+                let focused = group.id == activeGroupID && tab.id == group.selectedID
+                if tab.market?.isFocusedPane != focused { tab.market?.isFocusedPane = focused }
+            }
+        }
     }
 
     private static func groups(in node: LayoutNode) -> [PaneGroup] {
@@ -982,6 +1021,8 @@ final class AppRouter: ObservableObject {
 
     /// Opens a web tab in the active pane: at `address` (a URL, a bare domain, or a search), or blank with the address bar ready.
     func openWeb(_ address: String? = nil) {
+        // That a web tab was opened, never where it went.
+        Track.event("web_tab_opened")
         let group = activeGroup
         let tab = makeWebTab(url: address.flatMap(WebTabModel.resolve))
         let index = group.tabs.firstIndex { $0.id == group.selectedID }.map { $0 + 1 } ?? group.tabs.count
@@ -1156,6 +1197,13 @@ final class AppRouter: ObservableObject {
                 close(selected, in: activeGroup)
             case "{": step(-1)
             case "}": step(1)
+            case "z":
+                // ⌘Z takes back the last change to the chart's drawings; a text field keeps its own undo.
+                guard !isTyping, let market = activeMarket, market.canUndoDrawing else { return false }
+                market.undoDrawing()
+            case "Z":
+                guard !isTyping, let market = activeMarket, market.canRedoDrawing else { return false }
+                market.redoDrawing()
             case "[":
                 guard let web = activeWeb else { return false }
                 web.back()
@@ -1328,9 +1376,20 @@ final class AppRouter: ObservableObject {
         switch key.keyCode {
         case KeyCode.left: perps.moveCursor(-step)
         case KeyCode.right: perps.moveCursor(step)
+        case KeyCode.delete:
+            guard perps.removeSelectedDrawing() else { return false }
         case KeyCode.escape:
-            // Esc first puts a drawing tool down; only then does it reset the view.
-            if perps.drawTool != nil { perps.setDrawTool(nil) } else { perps.goLive() }
+            // Esc first puts a drawing tool down, then lets go of a selected drawing, then leaves a replay;
+            // only then does it reset the view.
+            if perps.drawTool != nil {
+                perps.setDrawTool(nil)
+            } else if perps.selectedDrawing != nil {
+                perps.selectDrawing(nil)
+            } else if perps.replayTime != nil {
+                perps.stopReplay()
+            } else {
+                perps.goLive()
+            }
         default:
             switch key.characters {
             case "[": perps.stepInterval(-1)
@@ -1342,6 +1401,13 @@ final class AppRouter: ObservableObject {
             case "g": perps.cycleGrouping()
             case "c": perps.cycleStyle()
             case "d": perps.setDrawTool(perps.drawTool == .trend ? nil : .trend)
+            case "m":
+                perps.chartSettings.magnet.toggle()
+                perps.notify(perps.chartSettings.magnet ? "Magnet on: drawing points snap to open, high, low and close" : "Magnet off")
+            // While candles are replayed: step back, step on, play or pause.
+            case ",": guard perps.replayTime != nil else { return false }; perps.stepReplay(-1)
+            case ".": guard perps.replayTime != nil else { return false }; perps.stepReplay(1)
+            case " ": guard perps.replayTime != nil else { return false }; perps.toggleReplayPlayback()
             case "o": perps.ticketFocusRequest += 1
             case "w":
                 // W stars this market into the watchlist, or takes it back out.

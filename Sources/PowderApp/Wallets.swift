@@ -212,18 +212,26 @@ final class WalletProvider: ObservableObject {
     /// Generates a new key on this Mac.
     @discardableResult
     func create(name: String = "") throws -> Wallet {
-        try add(key: EthKey.generate(), name: name)
+        let wallet = try add(key: EthKey.generate(), name: name)
+        Track.event("wallet_added", ["how": "created", "wallets": wallets.count])
+        return wallet
     }
 
     /// Adds an existing private key: 64 hex characters (with or without `0x`), or a Solana wallet's
     /// export (base58, or a keypair file's JSON array). Either way the one key serves both chains.
     @discardableResult
     func importWallet(name: String = "", privateKey: String) throws -> Wallet {
-        if let key = try? EthKey.parse(privateKey) { return try add(key: key, name: name) }
-        guard let seed = try? SolanaKey.parse(privateKey), (try? EthKey.address(of: seed)) != nil else {
-            throw EthKeyError.invalidPrivateKey
+        let wallet: Wallet
+        if let key = try? EthKey.parse(privateKey) {
+            wallet = try add(key: key, name: name)
+        } else {
+            guard let seed = try? SolanaKey.parse(privateKey), (try? EthKey.address(of: seed)) != nil else {
+                throw EthKeyError.invalidPrivateKey
+            }
+            wallet = try add(key: seed, name: name)
         }
-        return try add(key: seed, name: name)
+        Track.event("wallet_added", ["how": "imported", "wallets": wallets.count])
+        return wallet
     }
 
     private func add(key: Data, name: String) throws -> Wallet {
@@ -365,6 +373,12 @@ final class WalletProvider: ObservableObject {
                 privateKey: privateKey(for: wallet.id)
             )
             Task { await refresh(wallet.id) }
+            if case let .filled(filled, at) = outcome {
+                Track.event("trade", [
+                    "venue": Track.Venue.hyperliquid.rawValue, "market": "\(row.coin)/USDC", "asset": row.coin, "kind": "spot",
+                    "side": "sell", "order_type": "market", "size": filled, "price": at, "volume_usd": filled * at,
+                ])
+            }
             return outcome
         }
     }
@@ -454,10 +468,34 @@ final class WalletProvider: ObservableObject {
             }
             if signed != 0 { applyFill(walletID: wallet.id, coin: order.market.name, signedSize: signed, price: expected) }
         }
+        // Tracking is put together only once the exchange has answered: nothing of it runs ahead of the order.
+        func describe() -> [String: Any?] {
+            [
+                "venue": Track.Venue.hyperliquid.rawValue, "market": "\(order.market.name)/USDC", "asset": order.market.name, "kind": "perp",
+                "side": order.isBuy ? "buy" : "sell", "order_type": order.isMarket ? "market" : "limit", "reduce_only": order.reduceOnly,
+                "latency_ms": HyperliquidExchange.milliseconds(ContinuousClock.now - started),
+            ]
+        }
         do {
-            return try await deliver(order, wallet: wallet, key: key, before: before, started: started)
+            let outcome = try await deliver(order, wallet: wallet, key: key, before: before, started: started)
+            var tracked = describe()
+            switch outcome {
+            case let .filled(size, price):
+                // Volume is what actually traded, in dollars.
+                tracked.merge(["size": size, "price": price, "volume_usd": size * price]) { $1 }
+                Track.event("trade", tracked)
+            case .resting:
+                tracked.merge(["size": order.size, "price": order.price, "order_usd": order.size * order.price]) { $1 }
+                Track.event("order_placed", tracked)
+            case .done:
+                break
+            }
+            return outcome
         } catch {
             if let before { accounts[wallet.id] = before }
+            var tracked = describe()
+            tracked["reason"] = String(error.localizedDescription.prefix(120))
+            Track.event("order_failed", tracked)
             throw error
         }
     }

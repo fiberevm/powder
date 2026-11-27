@@ -93,6 +93,15 @@ struct SolanaStats: Equatable, Sendable {
     var exchanges: [SolanaExchange] = []
     var imageURL: URL?
     var decimals: Int?
+    /// What the pool takes from each swap, in basis points. Nil when Codex does not know it.
+    var poolFeeBps: Double?
+    /// True when the pool's fee moves with the market, so the figure is only its current one.
+    var hasDynamicFee = false
+
+    /// The pool's fee as a percentage: "0.25%", or "~0.25%" when it varies.
+    var poolFeeLabel: String? {
+        poolFeeBps.map { (hasDynamicFee ? "~" : "") + String(format: "%g%%", $0 / 100) }
+    }
 
     /// Where the token mostly trades.
     var exchange: String? { exchanges.first?.name }
@@ -320,7 +329,7 @@ enum SolanaAPI {
     // MARK: Pools
 
     private static let pairFields = """
-    price priceChange24 liquidity marketCap volumeUSD24 quoteToken
+    price priceChange24 liquidity marketCap volumeUSD24 quoteToken poolFeeBps dynamicFee
     pair { address }
     exchange { name address tradeUrl }
     token0 { address name symbol decimals info { imageThumbUrl imageSmallUrl } }
@@ -418,7 +427,8 @@ enum SolanaAPI {
             volume24: number(row["volumeUSD24"]), liquidity: number(row["liquidity"]), marketCap: isPriced ? number(row["marketCap"]) : 0,
             holders: nil, pairAddress: address, exchanges: [SolanaExchange(name: exchangeName, tradeURL: url)],
             imageURL: (info?["imageThumbUrl"] as? String ?? info?["imageSmallUrl"] as? String).flatMap(URL.init),
-            decimals: (own["decimals"] as? NSNumber)?.intValue
+            decimals: (own["decimals"] as? NSNumber)?.intValue,
+            poolFeeBps: (row["poolFeeBps"] as? NSNumber)?.doubleValue, hasDynamicFee: row["dynamicFee"] as? Bool ?? false
         )
     }
 
