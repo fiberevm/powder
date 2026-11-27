@@ -1,6 +1,12 @@
-# Powder
+<p align="center">
+  <img src="Assets/icon.png" width="128" alt="Powder icon">
+</p>
 
-**A native macOS trading terminal for Hyperliquid. Keyboard-first, monospaced, fast.**
+<h1 align="center">Powder</h1>
+
+<p align="center"><b>A native macOS trading terminal for Hyperliquid. Keyboard-first, monospaced, fast.</b></p>
+
+![Powder with five charts, the markets table and the positions table in split panes](Assets/screenshot.png)
 
 Powder is a single SwiftUI app: no Electron, no web view around the chart, no account, no server of ours in the middle. Orders are signed on your Mac and sent straight to the exchange.
 

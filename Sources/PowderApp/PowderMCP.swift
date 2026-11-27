@@ -266,7 +266,23 @@ final class PowderTools {
             "pane": ["type": "integer", "description": "Pane number. Default: the active pane."],
         ], required: ["address"]),
         tool("get_accounts", "Every wallet in the app (name and public address only): balances, open perp positions with live PnL and liquidation price, spot holdings, and resting orders."),
+        tool("screenshot", "Save a picture of the Powder window as a PNG in Powder's support folder and return its path. Web tabs may come out blank."),
     ]
+
+    /// The app draws its own window, so this needs no Screen Recording permission.
+    private func screenshot() throws -> String {
+        let windows = NSApp.windows.filter { $0.isVisible && $0.contentView != nil && !($0 is NSPanel) }
+        guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }),
+              let content = window.contentView else { throw ToolError("Powder has no open window.") }
+        let view = content.superview ?? content
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ToolError("The window could not be drawn.") }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]),
+              let folder = PowderMCPServer.supportFolder else { throw ToolError("The picture could not be saved.") }
+        let file = folder.appendingPathComponent("screenshot.png")
+        try data.write(to: file, options: .atomic)
+        return file.path
+    }
 
     func call(_ name: String, _ arguments: [String: Any]) async throws -> String {
         guard let router else { throw ToolError("Powder is closing.") }
@@ -415,6 +431,9 @@ final class PowderTools {
 
         case "get_accounts":
             return json(await accounts(in: router))
+
+        case "screenshot":
+            return try screenshot()
 
         default:
             throw ToolError("Unknown tool \(name).")
