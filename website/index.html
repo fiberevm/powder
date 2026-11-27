@@ -54,7 +54,66 @@
     </article>
   </section>
 
-  <section id="build" class="build">
+  <section class="block" id="commission">
+    <h2>$0 commission</h2>
+    <p class="note">Powder adds no fee of its own to any trade: no builder fee on Hyperliquid, no platform fee on Solana swaps. Move the slider to see what the same volume costs in platform commission elsewhere.</p>
+    <div class="slider">
+      <label for="volume">Trading volume</label>
+      <input id="volume" type="range" min="0" max="100" step="1" value="25" aria-describedby="volume-value">
+      <output id="volume-value" for="volume">$10,000</output>
+    </div>
+    <div class="fees">
+      <div>
+        <h3>Solana tokens</h3>
+        <table id="fees-solana"><tbody></tbody></table>
+      </div>
+      <div>
+        <h3>Hyperliquid perps</h3>
+        <table id="fees-perps"><tbody></tbody></table>
+      </div>
+    </div>
+    <p class="fine">Platform commission only, at each platform's standard published rate; tiers, referrals and cashback can lower it. Exchange and network costs are paid on any interface and are not included: Hyperliquid's own trading fee, Solana network fees, and landing tips (Powder's default Nozomi tip is 0.001 SOL per swap). Rates as reported in November 2026 by <a href="https://www.coingecko.com/research/publications/top-hyperliquid-builders">CoinGecko</a> (Hyperliquid builder fees) and <a href="https://madeonsol.com/blog/best-solana-sniping-tools">public</a> <a href="https://solanatools-io.pages.dev/blog/solana-trading-bot-fees-compared">comparisons</a> (Solana terminals); sources differ on some, so check each platform's own page.</p>
+  </section>
+
+  <section class="block" id="native">
+    <h2>Native, measured</h2>
+    <p class="note">The same Mac, the same connection, each product showing a live candle chart.</p>
+    <div class="scroll">
+    <table class="compare">
+      <thead>
+        <tr><th></th><th class="us">Powder</th><th>Hyperliquid web</th><th>Jupiter</th><th>DEX Screener</th><th>GMGN</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>First chart, first time</th><td class="us">0.6–0.7 s</td><td>2.0–2.2 s</td><td>2.6 s</td><td>3.2 s</td><td>not detected</td></tr>
+        <tr><th>First chart, after that</th><td class="us">0.6–0.7 s</td><td>0.8–0.9 s</td><td>1.6 s</td><td>3.1 s</td><td>1.2 s</td></tr>
+        <tr><th>Memory in use</th><td class="us">0.4 GB</td><td>2.0–2.3 GB</td><td>1.6–1.7 GB</td><td>1.9–2.1 GB</td><td>1.5–1.8 GB</td></tr>
+        <tr><th>What you install</th><td class="us">a 12 MB app</td><td colspan="4">a web browser</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="fine">Powder's time runs from the moment the app is launched until candles are drawn (four launches), and its memory is the whole app with two live charts, order books and tapes (0.37–0.45 GB). Web times run from the moment the page starts loading in an already-open Chrome until its chart canvas holds candles; web memory is everything that Chrome needs with that one tab open, where an empty Chrome is 0.36 GB. Measured November 2026 on an M4 Max MacBook Pro, macOS 26.6, Chrome 158, each window maximised. Axiom's chart sits behind a login and was not measured.</p>
+  </section>
+
+  <section class="block" id="orders">
+    <h2>Signing and landing</h2>
+    <div class="scroll">
+    <table class="compare">
+      <thead>
+        <tr><th></th><th class="us">Powder</th><th>Web terminals</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>Signing</th><td class="us">Native code on your Mac, under 1 ms. No popup.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
+        <tr><th>Where the key lives</th><td class="us">macOS Keychain.</td><td>Browser storage, an extension, or the platform.</td></tr>
+        <tr><th>Path to the chain</th><td class="us">Straight to Hyperliquid's API. Solana swaps go to Nozomi, which hands them to the block leader.</td><td>Usually through the site's own servers first.</td></tr>
+        <tr><th>When you see it</th><td class="us">Hyperliquid: at the keypress. Solana: as soon as the swap is priced. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
+        <tr><th>Time to land</th><td class="us">Hyperliquid fill confirmed in 0.73–1.1 s. Solana swap landed 0.45–0.71 s after sending.</td><td>Not published, and not measurable without trading on each.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="fine">Powder's figures are from its own order log: eight Hyperliquid market orders, and two Solana swaps sent through a public RPC (pricing the route took a further 0.46–0.63 s). Most of the Hyperliquid time is the exchange itself, which every interface pays.</p>
+  </section>
+
+  <section id="build" class="block build">
     <h2>Build it</h2>
     <p>macOS 14 or later, Xcode 15 or later.</p>
 <pre><code>git clone https://github.com/fiberevm/powder.git
@@ -66,5 +125,6 @@ cd powder
     <p>Powder trades on mainnet with real funds, and its trade keys send orders with no confirmation step. It is provided as is and is not financial advice.</p>
   </footer>
 </main>
+<script src="fees.js"></script>
 </body>
 </html>
