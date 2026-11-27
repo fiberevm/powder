@@ -84,3 +84,7 @@ swift test
 ```
 
 The code is one SwiftPM target under `Sources/PowderApp`, with a single dependency ([swift-secp256k1](https://github.com/21-DOT-DEV/swift-secp256k1)) for signing. `DESIGN.md` and `PRODUCT.md` describe the look and the intent.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
