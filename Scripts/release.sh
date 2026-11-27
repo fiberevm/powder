@@ -4,6 +4,8 @@
 #   ./Scripts/release.sh                 Apple silicon
 #   POWDER_ARCH=x86_64 ./Scripts/release.sh   Intel
 #   ./Scripts/release.sh --sign-only     stop after signing (nothing is sent to Apple)
+#   ./Scripts/release.sh --package-only  build the app and stop before signing
+#   ./Scripts/release.sh --prebuilt      sign and notarize what --package-only built
 #
 # Needs a "Developer ID Application" certificate in the keychain (POWDER_RELEASE_IDENTITY names one).
 # Notarization uses APPLE_ID, APPLE_APP_PASSWORD and APPLE_TEAM_ID when set (as in CI), else the
@@ -21,6 +23,19 @@ out="${project_root}/.build/release-${label}"
 app="${out}/Powder.app"
 profile="${POWDER_NOTARY_PROFILE:-powder-notary}"
 
+# Built into its own folder and signed there: the day-to-day build keeps its signature and its Keychain permissions.
+# `--package-only` stops here, and `--prebuilt` starts after here: CI compiles before the signing key is on the machine.
+if [[ "${1:-}" != "--prebuilt" ]]; then
+    rm -rf "${out}"
+    mkdir -p "${out}"
+    POWDER_ARCH="${arch}" POWDER_APP_DIR="${out}" POWDER_SIGN_IDENTITY="-" "${project_root}/Scripts/package_app.sh" >/dev/null
+fi
+if [[ "${1:-}" == "--package-only" ]]; then
+    echo "${app}"
+    exit 0
+fi
+[[ -d "${app}" ]] || { echo "Nothing to sign at ${app}." >&2; exit 1; }
+
 identity="${POWDER_RELEASE_IDENTITY:-}"
 if [[ -z "${identity}" ]]; then
     identities="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
@@ -31,11 +46,6 @@ if [[ -z "${identity}" ]]; then
     echo "No Developer ID Application certificate found. Set POWDER_RELEASE_IDENTITY." >&2
     exit 1
 fi
-
-# Built into its own folder and signed there: the day-to-day build keeps its signature and its Keychain permissions.
-rm -rf "${out}"
-mkdir -p "${out}"
-POWDER_ARCH="${arch}" POWDER_APP_DIR="${out}" POWDER_SIGN_IDENTITY="-" "${project_root}/Scripts/package_app.sh" >/dev/null
 
 # Hardened runtime and a secure timestamp are what notarization requires.
 codesign --force --options runtime --timestamp --sign "${identity}" "${app}"

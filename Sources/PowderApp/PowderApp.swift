@@ -20,7 +20,7 @@ struct PowderApp: App {
                 .frame(minWidth: 980, minHeight: 680)
         }
         .defaultSize(width: 1_360, height: 860)
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Go to Market or Command…") {
