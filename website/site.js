@@ -19,17 +19,17 @@ const brand = (name) => `<img class="logo" src="${icons[name]}" width="18" heigh
 
 const products = ["Powder", "Hyperliquid web", "Jupiter", "DEX Screener", "GMGN"];
 
-// value: what the bar shows (the middle of the measured range). text: what was measured.
+// value: what the bar shows, the average of the runs. text: the same, as written beside the bar.
 const charts = [
   {
     title: "Time to first chart",
     unit: "seconds, first visit",
-    rows: [[0.69, "0.6–0.9 s"], [2.1, "2.0–2.2 s"], [2.2, "1.9–2.6 s"], [3.2, "3.1–3.3 s"], [2.8, "2.8 s"]],
+    rows: [[0.7, "0.7 s"], [2.1, "2.1 s"], [2.3, "2.3 s"], [3.2, "3.2 s"], [2.8, "2.8 s"]],
   },
   {
     title: "Memory in use",
     unit: "GB, whole app or whole browser",
-    rows: [[0.35, "0.33–0.36 GB"], [2.1, "2.0–2.3 GB"], [1.55, "1.4–1.7 GB"], [1.95, "1.9–2.1 GB"], [1.65, "1.5–1.8 GB"]],
+    rows: [[0.34, "0.34 GB"], [2.1, "2.1 GB"], [1.5, "1.5 GB"], [2.0, "2.0 GB"], [1.7, "1.7 GB"]],
   },
   {
     title: "Processor while idle",
@@ -89,8 +89,8 @@ document.getElementById("charts").innerHTML = charts
   .join("");
 
 document.getElementById("bench-method").textContent =
-  "Method. Powder: time from the process starting until candles are drawn (eleven launches); memory and processor for the whole app with two live markets, each a chart, an order book and a trade tape. " +
-  "Web: a fresh Chrome profile with one tab; time from the page starting to load, in an already-open browser, until its chart canvas holds candles; memory and processor summed over every process Chrome needs for that tab (an empty Chrome is 0.2–0.4 GB and 0.3%). " +
+  "Method. Each figure is the average of its runs. Powder: time from the process starting until candles are drawn (eleven launches); memory and processor for the whole app with two live markets, each a chart, an order book and a trade tape. " +
+  "Web: a fresh Chrome profile with one tab; time from the page starting to load, in an already-open browser, until its chart canvas holds candles; memory and processor summed over every process Chrome needs for that tab (an empty Chrome is 0.3 GB and 0.3%). " +
   "Processor is the average over 30 seconds with nothing touched; Powder measured 5.3% with its two markets, shown here per market. All windows maximised. Measured November 2026 on an M4 Max MacBook Pro, macOS 26.6, Chrome 158. " +
   "DEX Screener is a chart viewer with no order book or tape, so it has less to keep up to date. Axiom's chart sits behind a login and was not measured.";
 
