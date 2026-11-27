@@ -18,6 +18,7 @@ Powder is a single SwiftUI app: no Electron, no web view around the chart, no ac
 - **Wallets.** Any number of wallets or Hyperliquid API wallets. One private key gives a Hyperliquid address and a Solana address. Keys live in the macOS Keychain and never leave it.
 - **Positions and markets.** Every position, balance and idle dollar across wallets in one live table; every perp in another.
 - **History.** Every fill and swap across wallets in one table (`⇧⌘Y`), with volume over 24 hours, 7 and 30 days, fees and realized PnL.
+- **Updates itself.** Checks for a new version at launch and every hour. A download is installed only if it carries the same Developer ID signature and Apple's notarization, and only when you say so.
 - **Chart trading.** Right-click the chart for a limit order, an alert or a price line at that price. Resting orders and alerts are drawn on the chart, and one command cancels every order.
 - **Watchlist and alerts.** Star markets from either venue into one live list (`w`), and get a notification when a price is reached.
 - **Liquidations.** Every Hyperliquid liquidation as it happens, with long and short totals (needs a [GoldRush](https://goldrush.dev) API key; Hyperliquid's own API only reports them per account).

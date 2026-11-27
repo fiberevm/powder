@@ -39,6 +39,25 @@ jobs:
           mv Powder-*-intel.zip Powder-intel.zip
           # The checksum list names the files as they are served here.
           shasum -a 256 Powder-apple-silicon.zip Powder-intel.zip > SHA256SUMS.txt
+          # The feed the app's updater reads. The app installs a download only if it also carries Powder's
+          # Developer ID signature and Apple's notarization, so this file alone cannot push a build.
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName,body,url > release.json
+          python3 - <<'PY'
+          import hashlib, json
+          release = json.load(open("release.json"))
+          def build(name):
+              return {"url": name, "sha256": hashlib.sha256(open(name, "rb").read()).hexdigest()}
+          feed = {
+              "version": release["tagName"].lstrip("v"),
+              "notes": release.get("body") or "",
+              "page": release.get("url") or "",
+              "apple-silicon": build("Powder-apple-silicon.zip"),
+              "intel": build("Powder-intel.zip"),
+          }
+          json.dump(feed, open("update.json", "w"), indent=2)
+          print(json.dumps({k: v for k, v in feed.items() if k != "notes"}, indent=2))
+          PY
+          rm release.json
           ls -la
 
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

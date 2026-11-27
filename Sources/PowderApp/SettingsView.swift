@@ -661,6 +661,18 @@ private struct AppearancePane: View {
                 }
                 .overlay(Rectangle().stroke(Term.rule, lineWidth: 1))
             }
+
+            SectionHeading(title: "Updates", subtitle: "Powder \(AppVersion.current)")
+            SettingRow(
+                label: "New versions",
+                note: router.updater.blocker
+                    ?? "Checked at launch and every hour. A download is installed only if it carries Powder's signature and Apple's notarization, and only when you say so."
+            ) {
+                TermButton("CHECK FOR UPDATES") {
+                    Task { await router.updater.check(userInitiated: true) }
+                    NSApp.windows.first { $0.isVisible && $0.title != "Settings" }?.makeKeyAndOrderFront(nil)
+                }
+            }
         }
         .padding(24)
     }

@@ -58,6 +58,8 @@ jobs:
       - name: Build
         env:
           POWDER_ARCH: ${{ matrix.arch }}
+          POWDER_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          POWDER_BUILD: ${{ github.run_number }}
         run: ./Scripts/release.sh --package-only
 
       - name: Install the signing certificate

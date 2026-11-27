@@ -30,6 +30,12 @@ if [[ "${1:-}" != "--prebuilt" ]]; then
     mkdir -p "${out}"
     POWDER_ARCH="${arch}" POWDER_APP_DIR="${out}" POWDER_SIGN_IDENTITY="-" "${project_root}/Scripts/package_app.sh" >/dev/null
 fi
+# A release takes its version from the tag it is built from (POWDER_VERSION=v0.2.0), so the app, the archive's
+# name and the update feed all agree. The updater compares this number with the running app's.
+if [[ -n "${POWDER_VERSION:-}" && "${1:-}" != "--prebuilt" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${POWDER_VERSION#v}" "${app}/Contents/Info.plist"
+    [[ -n "${POWDER_BUILD:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${POWDER_BUILD}" "${app}/Contents/Info.plist"
+fi
 if [[ "${1:-}" == "--package-only" ]]; then
     echo "${app}"
     exit 0

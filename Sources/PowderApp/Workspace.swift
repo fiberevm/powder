@@ -233,6 +233,7 @@ final class AppRouter: ObservableObject {
     let watchlist: WatchlistStore
     let alerts: AlertStore
     let solanaQuotes = SolanaQuotes()
+    let updater: Updater
     let triggers: SolanaTriggerStore
     let liquidations = LiquidationsModel()
 
@@ -244,6 +245,7 @@ final class AppRouter: ObservableObject {
         wallets = WalletProvider(defaults: defaults, vault: vault)
         wallets.directory = directory
         watchlist = WatchlistStore(defaults: defaults)
+        updater = Updater(defaults: defaults)
         alerts = AlertStore(defaults: defaults, directory: directory, quotes: solanaQuotes)
         triggers = SolanaTriggerStore(defaults: defaults, solana: wallets.solana, quotes: solanaQuotes)
         NotificationPresenter.center?.delegate = NotificationPresenter.shared
@@ -640,6 +642,9 @@ final class AppRouter: ObservableObject {
             command("Alerts: Open", "", "bell") { $0.openBoard(.alerts) },
             command("Liquidations: Open", "", "flame") { $0.openBoard(.liquidations) },
             command("Orders: Cancel All Resting Orders", "", "xmark.circle") { $0.cancelAllOrders() },
+            command("Powder: Check for Updates…", "", "arrow.down.circle") { router in
+                Task { await router.updater.check(userInitiated: true) }
+            },
             command("Launchpad: Open", "⌘L", "square.stack.3d.up") { $0.openLaunchpad() },
             command("Preferences: Light Theme", theme == .light ? "current" : "", "sun.max") { $0.setTheme(.light) },
             command("Preferences: Dark Theme", theme == .dark ? "current" : "", "moon") { $0.setTheme(.dark) },

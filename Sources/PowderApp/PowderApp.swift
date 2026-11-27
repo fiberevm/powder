@@ -22,6 +22,11 @@ struct PowderApp: App {
         .defaultSize(width: 1_360, height: 860)
         .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await router.updater.check(userInitiated: true) }
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Go to Market or Command…") {
                     router.openPalette()
@@ -126,6 +131,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// The update window over a dimmed workspace. Its own view, so the workspace is not redrawn as a download progresses.
+private struct UpdateOverlay: View {
+    @ObservedObject var updater: Updater
+
+    var body: some View {
+        if updater.isPresented {
+            ZStack {
+                Color.black.opacity(0.35)
+                    .onTapGesture { updater.dismiss() }
+                UpdateView(updater: updater)
+            }
+            .transition(.opacity)
+        }
+    }
+}
+
 struct RootView: View {
     @ObservedObject var router: AppRouter
     @Environment(\.openSettings) private var openSettings
@@ -144,6 +165,7 @@ struct RootView: View {
                     }
                 }
             }
+            .overlay { UpdateOverlay(updater: router.updater) }
             .overlay(alignment: .top) {
                 if router.isPaletteOpen {
                     ZStack(alignment: .top) {
@@ -155,6 +177,7 @@ struct RootView: View {
                     }
                 }
             }
+            .task { router.updater.start() }
             .task {
                 Track.event("app_opened", [
                     "theme": router.theme.rawValue, "panes": router.groups.count, "tabs": router.groups.reduce(0) { $0 + $1.tabs.count },

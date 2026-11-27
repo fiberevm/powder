@@ -252,6 +252,41 @@ func signingSpeed() throws {
     print(String(format: "BENCH hyperliquid order build+sign median %.0f µs | solana transaction sign median %.0f µs", order, swap))
 }
 
+@Test
+func updatesAreOfferedOnlyForNewerVersionsOfThisBuild() throws {
+    #expect(AppVersion.isNewer("0.1.1", than: "0.1.0"))
+    #expect(AppVersion.isNewer("v0.10.0", than: "0.9.3"))
+    #expect(AppVersion.isNewer("1.0", than: "0.99.99"))
+    #expect(!AppVersion.isNewer("0.1.0", than: "0.1.0"))
+    #expect(!AppVersion.isNewer("0.1", than: "0.1.0"))
+    #expect(!AppVersion.isNewer("0.0.9", than: "0.1.0"))
+
+    let feed = #"{"version":"v0.2.0","notes":" Faster. ","page":"https://example.com/r","apple-silicon":{"url":"Powder-apple-silicon.zip","sha256":"\#(String(repeating: "a", count: 64))"},"intel":{"url":"Powder-intel.zip","sha256":"\#(String(repeating: "B", count: 64))"}}"#
+    let info = try #require(try Updater.parse(Data(feed.utf8)))
+    #expect(info.version == "0.2.0" && info.notes == "Faster.")
+    // The address is relative to the feed, and always https.
+    #expect(info.url.absoluteString.hasPrefix("https://fiberevm.github.io/powder/downloads/Powder-"))
+    #expect(info.sha256 == info.sha256.lowercased() && info.sha256.count == 64)
+
+    // A feed that points somewhere insecure, or has no build for this Mac, offers nothing.
+    let insecure = #"{"version":"9.0.0","apple-silicon":{"url":"http://evil.example/x.zip","sha256":"\#(String(repeating: "a", count: 64))"},"intel":{"url":"http://evil.example/x.zip","sha256":"\#(String(repeating: "a", count: 64))"}}"#
+    #expect(try Updater.parse(Data(insecure.utf8)) == nil)
+    #expect(try Updater.parse(Data(#"{"version":"9.0.0"}"#.utf8)) == nil)
+    #expect(throws: UpdateError.self) { _ = try Updater.parse(Data("<html>".utf8)) }
+}
+
+/// Checks a real downloaded build's signature: run with POWDER_VERIFY_APP=/path/to/Powder.app.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["POWDER_VERIFY_APP"] != nil))
+func onlyTheGenuineNotarizedBuildPassesTheSignatureCheck() throws {
+    let app = URL(fileURLWithPath: ProcessInfo.processInfo.environment["POWDER_VERIFY_APP"] ?? "")
+    try CodeIdentity.verify(app, team: "UY3PTH7GDQ")
+    #expect(throws: UpdateError.self) { try CodeIdentity.verify(app, team: "AAAAAAAAAA") }
+    if let other = ProcessInfo.processInfo.environment["POWDER_VERIFY_OTHER"] {
+        // A development build, or one that was tampered with, is refused.
+        #expect(throws: UpdateError.self) { try CodeIdentity.verify(URL(fileURLWithPath: other), team: "UY3PTH7GDQ") }
+    }
+}
+
 /// Talks to Jupiter and a Solana RPC: run with POWDER_LIVE=1.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["POWDER_LIVE"] == "1"))
 func liveSwapStillSimulatesWithTheTip() async throws {
