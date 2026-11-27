@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Powder: a native trading terminal for Hyperliquid and Solana</title>
-<meta name="description" content="Powder is a native macOS trading terminal for Hyperliquid and Solana. First chart in 0.7 s, orders signed in 82 microseconds, $0 commission. Every number measured.">
+<meta name="description" content="Powder is a native macOS trading terminal for Hyperliquid and Solana. First chart in 696 ms, orders signed in 0.08 ms, $0 commission. Every number measured.">
 <meta property="og:title" content="Powder: a native trading terminal">
-<meta property="og:description" content="First chart in 0.7 s. Orders signed in 82 µs. $0 commission. Measured, not claimed.">
+<meta property="og:description" content="First chart in 696 ms. Orders signed in 0.08 ms. $0 commission. Measured, not claimed.">
 <meta property="og:image" content="screenshot.png">
 <link rel="icon" href="icon.png">
 <link rel="stylesheet" href="style.css">
@@ -29,7 +29,7 @@
         <p class="lede">A native trading terminal for Hyperliquid and Solana.</p>
       </div>
     </div>
-    <p class="pitch">No browser between you and the chain. One Mac app that draws its first chart before a web terminal has finished downloading, signs an order in microseconds, and takes nothing from your trades. Every figure on this page was measured.</p>
+    <p class="pitch">No browser between you and the chain. One Mac app that draws its first chart before a web terminal has finished downloading, signs an order in under a tenth of a millisecond, and takes nothing from your trades. Every figure on this page was measured.</p>
     <p class="actions">
       <a class="button primary" href="https://github.com/fiberevm/powder">Source on GitHub</a>
       <a class="button" href="#bench">See the numbers</a>
@@ -37,10 +37,10 @@
   </header>
 
   <section class="readout" aria-label="Measured figures">
-    <div><b>0.7<small>s</small></b><span>launch to first chart</span></div>
-    <div><b>82<small>µs</small></b><span>to sign an order</span></div>
+    <div><b>696<small>ms</small></b><span>launch to first chart</span></div>
+    <div><b>0.08<small>ms</small></b><span>to sign an order</span></div>
     <div><b>5<small>ms</small></b><span>to draw a chart frame</span></div>
-    <div><b>0.34<small>GB</small></b><span>memory, two live markets</span></div>
+    <div><b>341<small>MB</small></b><span>memory, two live markets</span></div>
     <div><b>2.7<small>%</small></b><span>of one core per live market</span></div>
     <div><b>$0</b><span>commission</span></div>
   </section>
@@ -69,7 +69,7 @@
         <tr><th></th><th class="us">Powder</th><th>Web terminals</th></tr>
       </thead>
       <tbody>
-        <tr><th>Signing</th><td class="us">Native code, 82 µs. No popup, no extension.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
+        <tr><th>Signing</th><td class="us">Native code, 0.08 ms. No popup, no extension.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
         <tr><th>Where the key lives</th><td class="us">macOS Keychain.</td><td>Browser storage, an extension, or the platform.</td></tr>
         <tr><th>Path to the chain</th><td class="us">Straight to Hyperliquid's API, or to Nozomi for Solana.</td><td>Usually through the site's own servers first.</td></tr>
         <tr><th>When you see it</th><td class="us">At the keypress on Hyperliquid; once priced on Solana. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
