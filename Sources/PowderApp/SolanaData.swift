@@ -23,6 +23,25 @@ struct SolanaToken: Equatable, Sendable {
     }
 }
 
+/// An exchange a token trades on, and where on its site the token can be traded.
+struct SolanaExchange: Equatable, Sendable {
+    let name: String
+    /// The exchange's own trading page, as Codex gives it.
+    var tradeURL: URL?
+
+    /// The exchange's page for one token where its address scheme is known, else its trading page.
+    func marketURL(mint: String) -> URL? {
+        let wrappedSOL = "So11111111111111111111111111111111111111112"
+        let lowered = name.lowercased()
+        if mint != wrappedSOL {
+            if lowered.hasPrefix("raydium") { return URL(string: "https://raydium.io/swap/?inputMint=sol&outputMint=\(mint)") }
+            if lowered.hasPrefix("pump") { return URL(string: "https://pump.fun/coin/\(mint)") }
+            if lowered.hasPrefix("orca") { return URL(string: "https://www.orca.so/?tokenIn=\(wrappedSOL)&tokenOut=\(mint)") }
+        }
+        return tradeURL
+    }
+}
+
 /// A token's live figures from Codex.
 struct SolanaStats: Equatable, Sendable {
     let token: SolanaToken
@@ -36,12 +55,12 @@ struct SolanaStats: Equatable, Sendable {
     /// The token's most liquid pool; its swaps are the trades tape.
     let pairAddress: String?
     /// The exchange that pool is on ("Raydium", "Orca", "Pump"), then the others the token trades on.
-    var exchanges: [String] = []
+    var exchanges: [SolanaExchange] = []
     var imageURL: URL?
     var decimals: Int?
 
     /// Where the token mostly trades.
-    var exchange: String? { exchanges.first }
+    var exchange: String? { exchanges.first?.name }
 
     /// The main exchange with a count of the rest: "Orca +5".
     var exchangeLabel: String? {
@@ -89,7 +108,7 @@ enum SolanaAPI {
     token { address name symbol decimals info { imageThumbUrl imageSmallUrl } }
     priceUSD change24 volume24 liquidity marketCap holders
     pair { address exchangeHash }
-    exchanges { name address }
+    exchanges { name address tradeUrl }
     """
 
     /// Tokens matching a name, symbol or address, most traded first.
@@ -242,9 +261,12 @@ enum SolanaAPI {
             // The top pool's exchange first: it is where the price and the tape come from.
             let listed = (row["exchanges"] as? [[String: Any]] ?? []).filter { !(($0["name"] as? String) ?? "").isEmpty }
             let home = pair?["exchangeHash"] as? String
-            var exchanges: [String] = []
+            var exchanges: [SolanaExchange] = []
             for exchange in listed.filter({ $0["address"] as? String == home }) + listed {
-                if let name = exchange["name"] as? String, !exchanges.contains(name) { exchanges.append(name) }
+                guard let name = exchange["name"] as? String, !exchanges.contains(where: { $0.name == name }) else { continue }
+                // Only real web links: the page is shown inside the app.
+                let url = (exchange["tradeUrl"] as? String).flatMap(URL.init).flatMap { $0.scheme == "https" ? $0 : nil }
+                exchanges.append(SolanaExchange(name: name, tradeURL: url))
             }
             let image = (info?["imageThumbUrl"] as? String ?? info?["imageSmallUrl"] as? String).flatMap(URL.init)
             return SolanaStats(

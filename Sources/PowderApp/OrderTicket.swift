@@ -24,9 +24,8 @@ enum OrderSound {
 /// Buy / sell for the tab's market: wallet selector, market or limit, a size, and the two buttons.
 /// Also shows the selected wallet's balance, its position here and its resting orders.
 struct OrderTicket: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
-    @EnvironmentObject private var directory: MarketDirectory
     @Environment(\.openSettings) private var openSettings
 
     private enum Kind { case market, limit }
@@ -228,7 +227,7 @@ struct OrderTicket: View {
             if orders.count > 1 {
                 Button {
                     Task {
-                        let result = await wallets.cancelAll(walletID: wallet.id, coin: model.coin, directory: directory)
+                        let result = await wallets.cancelAll(walletID: wallet.id, coin: model.coin)
                         messageIsError = result.hasPrefix("Cancel failed")
                         message = result
                     }

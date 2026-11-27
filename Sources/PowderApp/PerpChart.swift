@@ -269,7 +269,9 @@ struct PerpChart: View, Equatable {
             // Once a second, for the countdown to the candle close.
             TimelineView(.periodic(from: .now, by: 1)) { timeline in
                 Canvas { context, _ in
+                    let started = DispatchTime.now().uptimeNanoseconds
                     renderer.draw(in: &context, now: timeline.date)
+                    Launch.DrawTimer.shared.record(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
                 }
             }
             .contentShape(Rectangle())
@@ -824,12 +826,16 @@ private struct ChartRenderer {
 
     private func drawVolume(_ context: inout GraphicsContext) {
         guard let zone = layout.volumeZone, layout.maxVolume > 0 else { return }
+        // All the rising bars are one shape and all the falling bars another: two fills, however many candles show.
+        var rising = Path(), falling = Path()
         for index in layout.range {
             guard let candle = layout.candle(index) else { continue }
             let height = max(CGFloat(candle.v / layout.maxVolume) * zone.height, 1)
             let bar = CGRect(x: layout.x(index).rounded() - bodyWidth / 2, y: zone.maxY - height, width: bodyWidth, height: height)
-            context.fill(Path(bar), with: .color((candle.c >= candle.o ? up : down).opacity(0.3)))
+            if candle.c >= candle.o { rising.addRect(bar) } else { falling.addRect(bar) }
         }
+        context.fill(rising, with: .color(up.opacity(0.3)))
+        context.fill(falling, with: .color(down.opacity(0.3)))
     }
 
     private func drawSeries(_ context: inout GraphicsContext) {
@@ -878,7 +884,29 @@ private struct ChartRenderer {
                 context.stroke(path, with: .color(color), lineWidth: 1)
             }
 
-        case .candles, .hollow, .heikinAshi:
+        case .candles, .heikinAshi:
+            // Wicks and bodies of one colour are a single shape, so a full chart is two fills.
+            var rising = Path(), falling = Path()
+            for index in layout.range {
+                guard let candle = layout.candle(index) else { continue }
+                let x = layout.x(index).rounded()
+                let top = layout.y(max(candle.o, candle.c))
+                let bottom = layout.y(min(candle.o, candle.c))
+                let high = layout.y(candle.h)
+                let wick = CGRect(x: x - 0.5, y: high, width: 1, height: max(layout.y(candle.l) - high, 1))
+                let body = CGRect(x: x - bodyWidth / 2, y: top, width: bodyWidth, height: max(bottom - top, 1))
+                if candle.c >= candle.o {
+                    rising.addRect(wick)
+                    rising.addRect(body)
+                } else {
+                    falling.addRect(wick)
+                    falling.addRect(body)
+                }
+            }
+            context.fill(rising, with: .color(up))
+            context.fill(falling, with: .color(down))
+
+        case .hollow:
             for index in layout.range {
                 guard let candle = layout.candle(index) else { continue }
                 let rises = candle.c >= candle.o

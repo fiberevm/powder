@@ -31,4 +31,23 @@ enum Launch {
         hasChart = true
         HyperliquidExchange.log("launch: first chart (\(coin), \(candles) candles) \(elapsed)ms after process start")
     }
+
+    /// How long the chart takes to draw a frame, written to the log every 120 frames of a measuring run.
+    final class DrawTimer: @unchecked Sendable {
+        static let shared = DrawTimer()
+        private let lock = NSLock()
+        private var samples: [Double] = []
+
+        func record(_ milliseconds: Double) {
+            guard Launch.profile != nil else { return }
+            lock.lock()
+            samples.append(milliseconds)
+            let batch = samples.count >= 120 ? samples.sorted() : nil
+            if batch != nil { samples.removeAll(keepingCapacity: true) }
+            lock.unlock()
+            guard let batch else { return }
+            let median = batch[batch.count / 2], p99 = batch[Int(Double(batch.count) * 0.99)]
+            HyperliquidExchange.log(String(format: "chart draw: median %.2fms p99 %.2fms max %.2fms over %d frames", median, p99, batch.last ?? 0, batch.count))
+        }
+    }
 }

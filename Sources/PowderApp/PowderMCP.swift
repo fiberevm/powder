@@ -604,7 +604,7 @@ final class PowderTools {
             "volume_24h_usd": stats.volume24.rounded(), "liquidity_usd": stats.liquidity.rounded(), "market_cap_usd": stats.marketCap.rounded(),
         ]
         if let holders = stats.holders { info["holders"] = holders }
-        if !stats.exchanges.isEmpty { info["exchanges"] = stats.exchanges }
+        if !stats.exchanges.isEmpty { info["exchanges"] = stats.exchanges.map(\.name) }
         return info
     }
 

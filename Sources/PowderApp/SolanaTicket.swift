@@ -19,7 +19,7 @@ struct SolanaQuoteCurrency: Equatable, Identifiable {
 /// Buy / sell for a Solana token tab: wallet, what to pay with, a size to buy, a share of the holding to sell.
 /// Swaps are routed by Jupiter, signed here, and landed through Nozomi.
 struct SolanaTicket: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
     @EnvironmentObject private var triggers: SolanaTriggerStore
     @Environment(\.openSettings) private var openSettings

@@ -1,11 +1,10 @@
 import SwiftUI
 
 struct PerpsView: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
     @EnvironmentObject private var alerts: AlertStore
     @EnvironmentObject private var triggers: SolanaTriggerStore
-    @EnvironmentObject private var directory: MarketDirectory
 
     /// Below this width the book and trades move under the chart instead of beside it.
     private static let wideThreshold: CGFloat = 760
@@ -23,7 +22,7 @@ struct PerpsView: View {
                 TermRule()
 
                 if geometry.size.width >= Self.wideThreshold {
-                    HStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 0) {
                         chart
                         ResizeHandle(vertical: true) { start, translation in
                             if start { dragStart = model.sideWidth }
@@ -32,11 +31,14 @@ struct PerpsView: View {
                         VStack(spacing: 0) {
                             if model.solana != nil {
                                 // No order book on a Solana pool: the column is the ticket, the token's figures and its swaps.
-                                SolanaTicket(model: model)
+                                // Shown whole when there is room; in a short pane it scrolls so the chart keeps its place.
+                                ViewThatFits(in: .vertical) {
+                                    solanaSide
+                                    ScrollView { solanaSide }
+                                }
+                                .layoutPriority(1)
                                 TermRule()
-                                SolanaInfoPanel(model: model)
-                                TermRule()
-                                trades
+                                trades.frame(minHeight: 120)
                             } else {
                                 OrderTicket(model: model)
                                 TermRule()
@@ -205,7 +207,7 @@ struct PerpsView: View {
             items.append(DropdownItem("Cancel all \(restingOrders.count) \(model.coin) orders", id: "cancel-all", startsSection: true) {
                 closeChartMenu()
                 Task {
-                    model.notify(await wallets.cancelAll(walletID: wallets.selectedID, coin: model.coin, directory: directory))
+                    model.notify(await wallets.cancelAll(walletID: wallets.selectedID, coin: model.coin))
                 }
             })
         }
@@ -271,6 +273,14 @@ struct PerpsView: View {
             levels.append(ChartLevel(kind: .liquidation, price: liquidation, label: "LIQUIDATION"))
         }
         return levels
+    }
+
+    private var solanaSide: some View {
+        VStack(spacing: 0) {
+            SolanaTicket(model: model)
+            TermRule()
+            SolanaInfoPanel(model: model)
+        }
     }
 
     private var chart: some View {
@@ -340,7 +350,7 @@ struct PerpsView: View {
 // MARK: - Market header
 
 private struct MarketHeader: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
 
     var body: some View {
         HStack(alignment: .center, spacing: 22) {
@@ -350,9 +360,6 @@ private struct MarketHeader: View {
                 HStack(spacing: 8) {
                     Text(model.solana == nil ? "\(model.coin)/USDC" : "\(model.coin)/USD")
                         .font(Term.font(16, .bold))
-                    Text(model.solana == nil ? "PERP" : "SOLANA")
-                        .font(Term.font(10, .semibold))
-                        .foregroundStyle(.secondary)
                     if let leverage = model.market?.maxLeverage {
                         Text("\(leverage)x")
                             .font(Term.font(10, .semibold))
@@ -396,6 +403,14 @@ private struct MarketHeader: View {
             } else {
                 Spacer(minLength: 0)
             }
+
+            // What kind of market this is, in the header's top right corner.
+            Text(model.solana == nil ? "PERP" : "SOLANA")
+                .font(Term.font(10, .semibold))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, 8)
         }
         .lineLimit(1)
         .padding(.horizontal, 12)
@@ -482,7 +497,7 @@ private struct KeyCap: View {
 // MARK: - Chart header
 
 private struct ChartHeader: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
 
     /// Shown as buttons; the rest are in the "more" menu.
     private static let favorites: [HLInterval] = [.m1, .m5, .m15, .h1, .h4, .d1]
@@ -630,6 +645,11 @@ private struct OrderBookPanel: View, Equatable {
         let total: Double
     }
 
+    nonisolated static func == (lhs: OrderBookPanel, rhs: OrderBookPanel) -> Bool {
+        lhs.book == rhs.book && lhs.lastPrice == rhs.lastPrice && lhs.lastIsBuy == rhs.lastIsBuy && lhs.grouping == rhs.grouping
+            && lhs.coin == rhs.coin && lhs.priceDecimals == rhs.priceDecimals && lhs.sizeDecimals == rhs.sizeDecimals
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             PanelTitle("ORDER BOOK") {
@@ -644,34 +664,80 @@ private struct OrderBookPanel: View, Equatable {
                 let bids = rows(book?.bids ?? [], depth: depth)
                 let maxTotal = max(asks.last?.total ?? 0, bids.last?.total ?? 0, .leastNonzeroMagnitude)
 
+                // Each side is drawn in one pass. As separate text views, the sixty-odd cells cost more to
+                // lay out on every update than everything else in the pane together.
                 VStack(spacing: 0) {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        // Rows are keyed by price, so a level that moves slides and a new one fades in.
-                        ForEach(asks.reversed(), id: \.level.px) { row in
-                            line(row, color: PowderPalette.riskCoral, maxTotal: maxTotal)
-                        }
+                    Canvas { context, size in
+                        draw(asks, bestAtBottom: true, color: PowderPalette.riskCoral, maxTotal: maxTotal, in: &context, size: size)
                     }
                     .frame(height: CGFloat(depth) * Term.rowHeight)
-                    .clipped()
-                    .animation(.easeOut(duration: 0.18), value: asks.map(\.level.px))
 
                     spread
                         .frame(height: Term.rowHeight + 8)
 
-                    VStack(spacing: 0) {
-                        ForEach(bids, id: \.level.px) { row in
-                            line(row, color: PowderPalette.signalGreen, maxTotal: maxTotal)
-                        }
-                        Spacer(minLength: 0)
+                    Canvas { context, size in
+                        draw(bids, bestAtBottom: false, color: PowderPalette.signalGreen, maxTotal: maxTotal, in: &context, size: size)
                     }
                     .frame(height: CGFloat(depth) * Term.rowHeight)
-                    .clipped()
-                    .animation(.easeOut(duration: 0.18), value: bids.map(\.level.px))
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }
             .clipped()
+        }
+        .onChange(of: book) { old, new in flashChanges(from: old, to: new) }
+    }
+
+    /// Price levels whose size just changed, lit for a moment.
+    @State private var flashing: Set<Double> = []
+    @State private var flashRound = 0
+
+    private func flashChanges(from old: HLBook?, to new: HLBook?) {
+        guard let old, let new else { return }
+        var sizes: [Double: Double] = [:]
+        for level in old.bids + old.asks { sizes[level.px] = level.sz }
+        var changed: Set<Double> = []
+        for level in (new.bids.prefix(30) + new.asks.prefix(30)) {
+            if let before = sizes[level.px], before != level.sz { changed.insert(level.px) }
+        }
+        guard changed != flashing else { return }
+        flashing = changed
+        flashRound += 1
+        let round = flashRound
+        Task { @MainActor in
+            // On, then off: two redraws per update, not a fade's sixty.
+            try? await Task.sleep(for: .milliseconds(160))
+            if flashRound == round { flashing = [] }
+        }
+    }
+
+    private func draw(
+        _ rows: [Row], bestAtBottom: Bool, color: Color, maxTotal: Double, in context: inout GraphicsContext, size: CGSize
+    ) {
+        let rowHeight = Term.rowHeight
+        let inset: CGFloat = 12
+        let column = (size.width - inset * 2) / 3
+        let font = Term.font(11.5)
+        for (index, row) in rows.enumerated() {
+            let top = bestAtBottom ? size.height - CGFloat(index + 1) * rowHeight : CGFloat(index) * rowHeight
+            let middle = top + rowHeight / 2
+            // Depth: a bar growing from the right, as wide as this level's share of the deepest total shown.
+            let width = size.width * CGFloat(row.total / maxTotal)
+            context.fill(Path(CGRect(x: size.width - width, y: top, width: width, height: rowHeight)), with: .color(color.opacity(0.14)))
+            if flashing.contains(row.level.px) {
+                context.fill(Path(CGRect(x: 0, y: top, width: size.width, height: rowHeight)), with: .color(color.opacity(0.3)))
+            }
+            context.draw(
+                Text(HLFormat.price(row.level.px, decimals: priceDecimals)).font(font).foregroundStyle(color),
+                at: CGPoint(x: inset, y: middle), anchor: .leading
+            )
+            context.draw(
+                Text(HLFormat.size(row.level.sz, decimals: sizeDecimals)).font(font).foregroundStyle(Term.foreground),
+                at: CGPoint(x: inset + column * 2, y: middle), anchor: .trailing
+            )
+            context.draw(
+                Text(HLFormat.size(row.total, decimals: sizeDecimals)).font(font).foregroundStyle(.secondary),
+                at: CGPoint(x: size.width - inset, y: middle), anchor: .trailing
+            )
         }
     }
 
@@ -719,66 +785,9 @@ private struct OrderBookPanel: View, Equatable {
             return Row(level: level, total: total)
         }
     }
-
-    private func line(_ row: Row, color: Color, maxTotal: Double) -> some View {
-        BookLine(
-            price: HLFormat.price(row.level.px, decimals: priceDecimals),
-            size: row.level.sz,
-            sizeText: HLFormat.size(row.level.sz, decimals: sizeDecimals),
-            totalText: HLFormat.size(row.total, decimals: sizeDecimals),
-            fraction: CGFloat(row.total / maxTotal),
-            color: color
-        )
-        .transition(.opacity)
-    }
 }
 
-/// One price level. The depth bar eases to its new width and the row flashes when its size changes.
-private struct BookLine: View {
-    let price: String
-    let size: Double
-    let sizeText: String
-    let totalText: String
-    let fraction: CGFloat
-    let color: Color
-
-    @State private var flash = 0.0
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Text(price)
-                .foregroundStyle(color)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(sizeText)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(totalText)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .font(Term.font(11.5))
-        .lineLimit(1)
-        .padding(.horizontal, 12)
-        .frame(height: Term.rowHeight)
-        .background {
-            ZStack {
-                Rectangle()
-                    .fill(color.opacity(0.14))
-                    .scaleEffect(x: fraction, anchor: .trailing)
-                    .animation(.easeOut(duration: 0.25), value: fraction)
-                color.opacity(flash)
-            }
-        }
-        .onChange(of: size) {
-            flash = 0.3
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(50))
-                withAnimation(.easeOut(duration: 0.5)) { flash = 0 }
-            }
-        }
-    }
-}
-
-/// A price that rolls its digits and flashes green or red behind itself as it ticks.
+/// A price that flashes green or red behind itself as it ticks.
 struct TickingPrice: View {
     let value: Double?
     let text: String
@@ -792,8 +801,6 @@ struct TickingPrice: View {
         Text(text)
             .font(font)
             .foregroundStyle(color)
-            .contentTransition(.numericText(value: value ?? 0))
-            .animation(.easeOut(duration: 0.2), value: text)
             .padding(.horizontal, 4)
             .background(flashColor.opacity(flash))
             .padding(.horizontal, -4)
@@ -802,8 +809,8 @@ struct TickingPrice: View {
                 flashColor = new > old ? PowderPalette.signalGreen : PowderPalette.riskCoral
                 flash = 0.35
                 Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(50))
-                    withAnimation(.easeOut(duration: 0.55)) { flash = 0 }
+                    try? await Task.sleep(for: .milliseconds(180))
+                    flash = 0
                 }
             }
     }
@@ -816,58 +823,67 @@ private struct TradesPanel: View, Equatable {
     let priceDecimals: Int
     let sizeDecimals: Int
 
+    /// Prints that just arrived, lit for a moment.
+    @State private var flashing: Set<Int64> = []
+    @State private var flashRound = 0
+
+    nonisolated static func == (lhs: TradesPanel, rhs: TradesPanel) -> Bool {
+        lhs.trades == rhs.trades && lhs.priceDecimals == rhs.priceDecimals && lhs.sizeDecimals == rhs.sizeDecimals
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             PanelTitle("TRADES") { EmptyView() }
             ColumnTitles(["PRICE", "SIZE", "TIME"])
 
-            GeometryReader { geometry in
-                let count = max(Int(geometry.size.height / Term.rowHeight), 0)
-                VStack(spacing: 0) {
-                    // Keyed by trade id: new prints push the list down and fade in.
-                    ForEach(trades.prefix(count), id: \.tid) { trade in
-                        TradeLine(trade: trade, priceDecimals: priceDecimals, sizeDecimals: sizeDecimals)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+            // The tape is drawn in one pass: a busy market prints many times a second, and as separate
+            // text views every print re-laid-out the whole list.
+            Canvas { context, size in
+                let rowHeight = Term.rowHeight
+                let inset: CGFloat = 12
+                let column = (size.width - inset * 2) / 3
+                let font = Term.font(11.5)
+                for (index, trade) in trades.prefix(max(Int(size.height / rowHeight), 0)).enumerated() {
+                    let top = CGFloat(index) * rowHeight
+                    let middle = top + rowHeight / 2
+                    let color = trade.isBuy ? PowderPalette.signalGreen : PowderPalette.riskCoral
+                    if flashing.contains(trade.tid) {
+                        context.fill(Path(CGRect(x: 0, y: top, width: size.width, height: rowHeight)), with: .color(color.opacity(0.3)))
                     }
+                    context.draw(
+                        Text(HLFormat.price(trade.px, decimals: priceDecimals)).font(font).foregroundStyle(color),
+                        at: CGPoint(x: inset, y: middle), anchor: .leading
+                    )
+                    context.draw(
+                        Text(HLFormat.size(trade.sz, decimals: sizeDecimals)).font(font).foregroundStyle(Term.foreground),
+                        at: CGPoint(x: inset + column * 2, y: middle), anchor: .trailing
+                    )
+                    context.draw(
+                        Text(HLFormat.clock(trade.time)).font(font).foregroundStyle(.secondary),
+                        at: CGPoint(x: size.width - inset, y: middle), anchor: .trailing
+                    )
                 }
-                .animation(.easeOut(duration: 0.2), value: trades.first?.tid)
             }
             .clipped()
         }
-    }
-}
-
-private struct TradeLine: View {
-    let trade: HLTrade
-    let priceDecimals: Int
-    let sizeDecimals: Int
-
-    @State private var flash = 0.0
-
-    var body: some View {
-        let color = trade.isBuy ? PowderPalette.signalGreen : PowderPalette.riskCoral
-        HStack(spacing: 0) {
-            Text(HLFormat.price(trade.px, decimals: priceDecimals))
-                .foregroundStyle(color)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(HLFormat.size(trade.sz, decimals: sizeDecimals))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(HLFormat.clock(trade.time))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .font(Term.font(11.5))
-        .lineLimit(1)
-        .padding(.horizontal, 12)
-        .frame(height: Term.rowHeight)
-        .background(color.opacity(flash))
-        .onAppear {
+        .onChange(of: trades.first?.tid) {
             // Only prints that just happened flash, not the backlog loaded with the tab.
-            guard Date().timeIntervalSince1970 * 1_000 - Double(trade.time) < 3_000 else { return }
-            flash = 0.3
-            withAnimation(.easeOut(duration: 0.7)) { flash = 0 }
+            let now = Date().timeIntervalSince1970 * 1_000
+            let fresh = Set(trades.prefix(40).filter { now - Double($0.time) < 3_000 && !flashing.contains($0.tid) }.map(\.tid))
+                .subtracting(seen)
+            seen = Set(trades.prefix(80).map(\.tid))
+            guard !fresh.isEmpty else { return }
+            flashing = fresh
+            flashRound += 1
+            let round = flashRound
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(200))
+                if flashRound == round { flashing = [] }
+            }
         }
     }
+
+    @State private var seen: Set<Int64> = []
 }
 
 private struct PanelTitle<Accessory: View>: View {
@@ -916,7 +932,7 @@ private struct ColumnTitles: View {
 // MARK: - Status bar
 
 private struct StatusBar: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
 
     private static let hints: [(String, String)] = [
         ("t", "tab"),
@@ -1043,7 +1059,7 @@ private struct KeyHelp: View {
 
 /// Under the ticket on a Solana token tab: what the token is and its live figures.
 private struct SolanaInfoPanel: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
     @State private var copied = false
 
     var body: some View {
@@ -1079,9 +1095,8 @@ private struct SolanaInfoPanel: View {
                 row("LIQUIDITY", "$" + HLFormat.compact(stats.liquidity))
                 row("24H VOL", "$" + HLFormat.compact(stats.volume24))
                 if let holders = stats.holders { row("HOLDERS", "\(holders)") }
-                if let exchange = stats.exchange {
-                    row("EXCHANGE", exchange)
-                    if stats.exchanges.count > 1 { row("ALSO ON", stats.exchanges.dropFirst().joined(separator: ", ")) }
+                ForEach(Array(stats.exchanges.enumerated()), id: \.element.name) { index, exchange in
+                    exchangeRow(index == 0 ? "EXCHANGE" : index == 1 ? "ALSO ON" : "", exchange, mint: stats.token.address)
                 }
             } else if !SolanaAPI.hasKey {
                 Text("Add a Codex API key in Settings ( ⌘, ) to load Solana data.")
@@ -1181,6 +1196,23 @@ private struct SolanaInfoPanel: View {
             Text(label).foregroundStyle(.secondary)
             Spacer(minLength: 4)
             Text(value).foregroundStyle(color).lineLimit(1).truncationMode(.middle)
+        }
+    }
+
+    /// One exchange the token trades on. A click opens the token there, in a Powder web tab.
+    @ViewBuilder
+    private func exchangeRow(_ label: String, _ exchange: SolanaExchange, mint: String) -> some View {
+        if let url = exchange.marketURL(mint: mint) {
+            Button {
+                model.onOpenLink?(url)
+            } label: {
+                row(label, exchange.name + " ↗", color: Term.accent)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open \(exchange.name): \(url.absoluteString)")
+        } else {
+            row(label, exchange.name)
         }
     }
 }

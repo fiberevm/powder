@@ -194,8 +194,24 @@ final class MarketDirectory: ObservableObject {
                 }
             },
             Task { [weak self] in
+                // Every market's price arrives with each block. Publishing each one redraws every view that
+                // shows a price, so they are passed on at most four times a second, always the latest.
+                var last = ContinuousClock.now - .seconds(1)
+                var pending: Task<Void, Never>?
                 for await event in HyperliquidSocket.events([.allMids]) {
-                    if case let .mids(mids) = event { self?.mids = mids }
+                    guard case let .mids(mids) = event else { continue }
+                    pending?.cancel()
+                    let wait = Duration.milliseconds(250) - (ContinuousClock.now - last)
+                    if wait <= .zero {
+                        last = .now
+                        if self?.mids != mids { self?.mids = mids }
+                    } else {
+                        pending = Task { [weak self] in
+                            try? await Task.sleep(for: wait)
+                            guard !Task.isCancelled else { return }
+                            if self?.mids != mids { self?.mids = mids }
+                        }
+                    }
                 }
             },
         ]
@@ -226,6 +242,7 @@ final class AppRouter: ObservableObject {
     init(defaults: UserDefaults = .standard, vault: KeyVault = KeychainVault()) {
         self.defaults = defaults
         wallets = WalletProvider(defaults: defaults, vault: vault)
+        wallets.directory = directory
         watchlist = WatchlistStore(defaults: defaults)
         alerts = AlertStore(defaults: defaults, directory: directory, quotes: solanaQuotes)
         triggers = SolanaTriggerStore(defaults: defaults, solana: wallets.solana, quotes: solanaQuotes)
@@ -692,7 +709,7 @@ final class AppRouter: ObservableObject {
     /// Cancels every resting order in every wallet. The result is shown on the active market tab.
     func cancelAllOrders() {
         Task {
-            let result = await wallets.cancelAll(directory: directory)
+            let result = await wallets.cancelAll()
             activeMarket?.notify(result)
         }
     }
