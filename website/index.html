@@ -40,7 +40,7 @@
     <div><b>0.7<small>s</small></b><span>launch to first chart</span></div>
     <div><b>82<small>µs</small></b><span>to sign an order</span></div>
     <div><b>5<small>ms</small></b><span>to draw a chart frame</span></div>
-    <div><b>0.35<small>GB</small></b><span>memory, two live markets</span></div>
+    <div><b>0.34<small>GB</small></b><span>memory, two live markets</span></div>
     <div><b>2.7<small>%</small></b><span>of one core per live market</span></div>
     <div><b>$0</b><span>commission</span></div>
   </section>
@@ -62,7 +62,7 @@
     <h2>Where the milliseconds go</h2>
     <p class="note">From keypress to confirmed, out of Powder's own order log. Powder's part is too small to draw to scale; the rest is the network and the chain, which every interface pays.</p>
     <div class="paths" id="paths"></div>
-    <p class="fine">Hyperliquid: median of eight market orders (range 728–1,110 ms). Solana: the faster of two swaps sent through a public RPC (the other took 1,168 ms); Powder also sends through Nozomi, which hands the transaction to the block leader. Signing times are medians of 2,000 runs in a release build.</p>
+    <p class="fine">Hyperliquid: median of eight market orders. Solana: the faster of two swaps sent through a public RPC (the other took 1,168 ms); Powder also sends through Nozomi, which hands the transaction to the block leader. Signing times are medians of 2,000 runs in a release build.</p>
     <div class="scroll">
     <table class="compare">
       <thead>
