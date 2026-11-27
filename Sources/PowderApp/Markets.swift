@@ -352,8 +352,8 @@ private struct MarketRow: View, Equatable {
             flashColor = new > old ? PowderPalette.signalGreen : PowderPalette.riskCoral
             flashOpacity = 0.5
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(60))
-                withAnimation(.easeOut(duration: 0.7)) { flashOpacity = 0 }
+                try? await Task.sleep(for: .milliseconds(180))
+                flashOpacity = 0
             }
         }
     }

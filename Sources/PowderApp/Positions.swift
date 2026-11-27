@@ -647,8 +647,8 @@ struct PositionLine: View, Equatable {
             flashColor = new > old ? PowderPalette.signalGreen : PowderPalette.riskCoral
             flash = 0.45
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(60))
-                withAnimation(.easeOut(duration: 0.7)) { flash = 0 }
+                try? await Task.sleep(for: .milliseconds(180))
+                flash = 0
             }
         }
     }

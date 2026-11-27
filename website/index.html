@@ -4,57 +4,83 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Powder: a native trading terminal for Hyperliquid and Solana</title>
-<meta name="description" content="Powder is a native macOS trading terminal for Hyperliquid and Solana. Keyboard-first, monospaced, fast. Orders are signed on your Mac.">
-<meta property="og:title" content="Powder">
-<meta property="og:description" content="A native macOS trading terminal for Hyperliquid and Solana.">
+<meta name="description" content="Powder is a native macOS trading terminal for Hyperliquid and Solana. First chart in 0.7 s, orders signed in 82 microseconds, $0 commission. Every number measured.">
+<meta property="og:title" content="Powder: a native trading terminal">
+<meta property="og:description" content="First chart in 0.7 s. Orders signed in 82 µs. $0 commission. Measured, not claimed.">
 <meta property="og:image" content="screenshot.png">
 <link rel="icon" href="icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="statusbar" aria-hidden="true">
+  <span><b>POWDER</b> 0.1.0</span>
+  <span>macOS 14+</span>
+  <span>arm64 · x86_64</span>
+  <span>signed · notarized</span>
+  <span class="live"><i></i>mainnet</span>
+</div>
+
 <main>
-  <header>
-    <img class="icon" src="icon.png" width="88" height="88" alt="">
-    <h1>Powder</h1>
-    <p class="lede">A native macOS trading terminal for Hyperliquid and Solana.<br>Keyboard-first, monospaced, fast.</p>
+  <header class="hero">
+    <div class="title">
+      <img class="icon" src="icon.png" width="56" height="56" alt="">
+      <div>
+        <h1>Powder</h1>
+        <p class="lede">A native trading terminal for Hyperliquid and Solana.</p>
+      </div>
+    </div>
+    <p class="pitch">No browser between you and the chain. One Mac app that draws its first chart before a web terminal has finished downloading, signs an order in microseconds, and takes nothing from your trades. Every figure on this page was measured.</p>
     <p class="actions">
       <a class="button primary" href="https://github.com/fiberevm/powder">Source on GitHub</a>
-      <a class="button" href="#build">Build it</a>
+      <a class="button" href="#bench">See the numbers</a>
     </p>
   </header>
+
+  <section class="readout" aria-label="Measured figures">
+    <div><b>0.7<small>s</small></b><span>launch to first chart</span></div>
+    <div><b>82<small>µs</small></b><span>to sign an order</span></div>
+    <div><b>5<small>ms</small></b><span>to draw a chart frame</span></div>
+    <div><b>0.35<small>GB</small></b><span>memory, two live markets</span></div>
+    <div><b>2.7<small>%</small></b><span>of one core per live market</span></div>
+    <div><b>$0</b><span>commission</span></div>
+  </section>
 
   <figure>
     <img src="screenshot.png" width="2400" height="588" alt="Powder showing the live markets table beside a BTC candle chart">
   </figure>
 
-  <section class="grid" aria-label="Features">
-    <article>
-      <h2>Signed on your Mac</h2>
-      <p>Keys live in the macOS Keychain. Orders go straight to the exchange: no account, no server of ours in between.</p>
-    </article>
-    <article>
-      <h2>One key, two chains</h2>
-      <p>A wallet has a Hyperliquid address and a Solana address. Perps, and any Solana token through Jupiter and Nozomi.</p>
-    </article>
-    <article>
-      <h2>Built for the keyboard</h2>
-      <p><kbd>⌘P</kbd> finds any market. <kbd>⇧B</kbd> and <kbd>⇧S</kbd> trade. Split panes, drag tabs, and the layout stays put.</p>
-    </article>
-    <article>
-      <h2>Trade from the chart</h2>
-      <p>Right-click for a limit order, an alert or a price line. Entry, liquidation and resting orders are drawn where they sit.</p>
-    </article>
-    <article>
-      <h2>Everything in one window</h2>
-      <p>Positions, history, watchlist, alerts and liquidations as tabs, next to web pages you want in view.</p>
-    </article>
-    <article>
-      <h2>An assistant that can't trade</h2>
-      <p><kbd>⌘K</kbd> asks Claude or Codex to arrange your workspace and read data. It has no tool that places an order.</p>
-    </article>
+  <section class="block" id="bench">
+    <p class="eyebrow">Benchmarks</p>
+    <h2>Against the web terminals</h2>
+    <p class="note">Same Mac, same connection, each web product showing one market. Powder is showing two, each with its chart, order book and trade tape. Shorter bars are better.</p>
+    <div class="charts" id="charts"></div>
+    <p class="fine" id="bench-method"></p>
+  </section>
+
+  <section class="block" id="path">
+    <p class="eyebrow">Order path</p>
+    <h2>Where the milliseconds go</h2>
+    <p class="note">From keypress to confirmed, out of Powder's own order log. Powder's part is too small to draw to scale; the rest is the network and the chain, which every interface pays.</p>
+    <div class="paths" id="paths"></div>
+    <p class="fine">Hyperliquid: median of eight market orders (range 728–1,110 ms). Solana: the faster of two swaps sent through a public RPC (the other took 1,168 ms); Powder also sends through Nozomi, which hands the transaction to the block leader. Signing times are medians of 2,000 runs in a release build.</p>
+    <div class="scroll">
+    <table class="compare">
+      <thead>
+        <tr><th></th><th class="us">Powder</th><th>Web terminals</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>Signing</th><td class="us">Native code, 82 µs. No popup, no extension.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
+        <tr><th>Where the key lives</th><td class="us">macOS Keychain.</td><td>Browser storage, an extension, or the platform.</td></tr>
+        <tr><th>Path to the chain</th><td class="us">Straight to Hyperliquid's API, or to Nozomi for Solana.</td><td>Usually through the site's own servers first.</td></tr>
+        <tr><th>When you see it</th><td class="us">At the keypress on Hyperliquid; once priced on Solana. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
+        <tr><th>Time to land</th><td class="us">Measured above.</td><td>Not published, and not measurable without trading on each.</td></tr>
+      </tbody>
+    </table>
+    </div>
   </section>
 
   <section class="block" id="commission">
+    <p class="eyebrow">Cost</p>
     <h2>$0 commission</h2>
     <p class="note">Powder adds no fee of its own to any trade: no builder fee on Hyperliquid, no platform fee on Solana swaps. Move the slider to see what the same volume costs in platform commission elsewhere.</p>
     <div class="slider">
@@ -75,47 +101,26 @@
     <p class="fine">Platform commission only, at each platform's standard published rate; tiers, referrals and cashback can lower it. Exchange and network costs are paid on any interface and are not included: Hyperliquid's own trading fee, Solana network fees, and landing tips (Powder's default Nozomi tip is 0.001 SOL per swap). Rates as reported in November 2026 by <a href="https://www.coingecko.com/research/publications/top-hyperliquid-builders">CoinGecko</a> (Hyperliquid builder fees) and <a href="https://madeonsol.com/blog/best-solana-sniping-tools">public</a> <a href="https://solanatools-io.pages.dev/blog/solana-trading-bot-fees-compared">comparisons</a> (Solana terminals); sources differ on some, so check each platform's own page.</p>
   </section>
 
-  <section class="block" id="native">
-    <h2>Native, measured</h2>
-    <p class="note">The same Mac, the same connection, each product showing a live candle chart.</p>
-    <div class="scroll">
-    <table class="compare">
-      <thead>
-        <tr><th></th><th class="us">Powder</th><th>Hyperliquid web</th><th>Jupiter</th><th>DEX Screener</th><th>GMGN</th></tr>
-      </thead>
-      <tbody>
-        <tr><th>First chart, first time</th><td class="us">0.6–0.7 s</td><td>2.0–2.2 s</td><td>2.6 s</td><td>3.2 s</td><td>not detected</td></tr>
-        <tr><th>First chart, after that</th><td class="us">0.6–0.7 s</td><td>0.8–0.9 s</td><td>1.6 s</td><td>3.1 s</td><td>1.2 s</td></tr>
-        <tr><th>Memory in use</th><td class="us">0.4 GB</td><td>2.0–2.3 GB</td><td>1.6–1.7 GB</td><td>1.9–2.1 GB</td><td>1.5–1.8 GB</td></tr>
-        <tr><th>What you install</th><td class="us">a 12 MB app</td><td colspan="4">a web browser</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="fine">Powder's time runs from the moment the app is launched until candles are drawn (four launches), and its memory is the whole app with two live charts, order books and tapes (0.37–0.45 GB). Web times run from the moment the page starts loading in an already-open Chrome until its chart canvas holds candles; web memory is everything that Chrome needs with that one tab open, where an empty Chrome is 0.36 GB. Measured November 2026 on an M4 Max MacBook Pro, macOS 26.6, Chrome 158, each window maximised. Axiom's chart sits behind a login and was not measured.</p>
-  </section>
-
-  <section class="block" id="orders">
-    <h2>Signing and landing</h2>
-    <div class="scroll">
-    <table class="compare">
-      <thead>
-        <tr><th></th><th class="us">Powder</th><th>Web terminals</th></tr>
-      </thead>
-      <tbody>
-        <tr><th>Signing</th><td class="us">Native code on your Mac, under 1 ms. No popup.</td><td>The page's JavaScript, a wallet extension popup, or a key the platform holds for you.</td></tr>
-        <tr><th>Where the key lives</th><td class="us">macOS Keychain.</td><td>Browser storage, an extension, or the platform.</td></tr>
-        <tr><th>Path to the chain</th><td class="us">Straight to Hyperliquid's API. Solana swaps go to Nozomi, which hands them to the block leader.</td><td>Usually through the site's own servers first.</td></tr>
-        <tr><th>When you see it</th><td class="us">Hyperliquid: at the keypress. Solana: as soon as the swap is priced. Corrected when it lands, undone if it fails.</td><td>Varies by site.</td></tr>
-        <tr><th>Time to land</th><td class="us">Hyperliquid fill confirmed in 0.73–1.1 s. Solana swap landed 0.45–0.71 s after sending.</td><td>Not published, and not measurable without trading on each.</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="fine">Powder's figures are from its own order log: eight Hyperliquid market orders, and two Solana swaps sent through a public RPC (pricing the route took a further 0.46–0.63 s). Most of the Hyperliquid time is the exchange itself, which every interface pays.</p>
+  <section class="block" id="spec">
+    <p class="eyebrow">Spec sheet</p>
+    <h2>What it does</h2>
+    <dl class="spec">
+      <div><dt>Markets</dt><dd>Every Hyperliquid perp. Any Solana token, routed by Jupiter, landed by Nozomi.</dd></div>
+      <div><dt>Wallets</dt><dd>One private key gives a Hyperliquid and a Solana address. Keys never leave the macOS Keychain.</dd></div>
+      <div><dt>Orders</dt><dd>Market and limit, <kbd>⇧B</kbd> <kbd>⇧S</kbd> from anywhere, right-click the chart for a limit at that price. Stop loss and take profit on Solana holdings.</dd></div>
+      <div><dt>Charts</dt><dd>Six types, 14 intervals, MA, EMA, Bollinger, VWAP, RSI, MACD, drawings. Entry, liquidation, resting orders and alerts drawn where they sit.</dd></div>
+      <div><dt>Workspace</dt><dd>Split panes and tabs, driven from the keyboard. <kbd>⌘P</kbd> finds any market on either chain, ranked by volume.</dd></div>
+      <div><dt>Tabs</dt><dd>Positions, history, watchlist, alerts, liquidations, and web pages next to your charts.</dd></div>
+      <div><dt>Token checks</dt><dd>Mint and freeze authority, holder concentration, liquidity and age on every Solana token.</dd></div>
+      <div><dt>Assistant</dt><dd><kbd>⌘K</kbd> asks Claude or Codex to arrange the workspace and read data. It has no tool that can place an order.</dd></div>
+      <div><dt>Builds</dt><dd>Apple silicon and Intel, signed with a Developer ID and notarized by Apple.</dd></div>
+    </dl>
   </section>
 
   <section id="build" class="block build">
+    <p class="eyebrow">Install</p>
     <h2>Build it</h2>
-    <p>macOS 14 or later, Xcode 15 or later.</p>
+    <p class="note">macOS 14 or later, Xcode 16 or later.</p>
 <pre><code>git clone https://github.com/fiberevm/powder.git
 cd powder
 ./Scripts/package_app.sh &amp;&amp; open .build/Powder.app</code></pre>
@@ -125,6 +130,6 @@ cd powder
     <p>Powder trades on mainnet with real funds, and its trade keys send orders with no confirmation step. It is provided as is and is not financial advice.</p>
   </footer>
 </main>
-<script src="fees.js"></script>
+<script src="site.js"></script>
 </body>
 </html>

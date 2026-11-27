@@ -208,6 +208,30 @@ func stopsAndTargetsOnlyGoOnTheirOwnSideOfThePrice() throws {
     #expect(store.triggers.isEmpty)
 }
 
+/// How long signing takes: run with POWDER_BENCH=1, in a release build for real figures.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["POWDER_BENCH"] == "1"))
+func signingSpeed() throws {
+    let key = Data(hex: "0x0123456789012345678901234567890123456789012345678901234567890123")!
+    func median(_ runs: Int, _ work: () throws -> Void) rethrows -> Double {
+        var times: [Double] = []
+        for _ in 0..<runs {
+            let started = DispatchTime.now().uptimeNanoseconds
+            try work()
+            times.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000)
+        }
+        return times.sorted()[runs / 2]
+    }
+    var nonce: Int64 = 1_795_000_000_000
+    let order = try median(2_000) {
+        nonce += 1
+        let action = HLAction.order(asset: 4, isBuy: true, price: "1670.1", size: "0.0147", reduceOnly: false, tif: .ioc)
+        _ = try HLSigning.sign(action, nonce: nonce, privateKey: key)
+    }
+    let message = Data((0..<600).map { UInt8($0 % 251) })
+    let swap = try median(2_000) { _ = try SolanaKey.sign(message, seed: key) }
+    print(String(format: "BENCH hyperliquid order build+sign median %.0f µs | solana transaction sign median %.0f µs", order, swap))
+}
+
 /// Talks to Jupiter and a Solana RPC: run with POWDER_LIVE=1.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["POWDER_LIVE"] == "1"))
 func liveSwapStillSimulatesWithTheTip() async throws {

@@ -1,45 +1,50 @@
 import Foundation
+import Observation
 
 /// Live state for the Perpetuals tab: one focused Hyperliquid market plus the market list.
 @MainActor
-final class PerpsModel: ObservableObject {
+/// Observed property by property: a view is redrawn only when a value it actually reads changes, so a new
+/// order book redraws the book and nothing else. (With one change signal for the whole model, every tick
+/// recomputed the entire pane.)
+@Observable
+final class PerpsModel {
     // Market data
-    @Published private(set) var markets: [HLMarket] = []
-    @Published private(set) var coin: String
-    @Published private(set) var ctx: HLAssetCtx?
-    @Published private(set) var book: HLBook?
-    @Published private(set) var trades: [HLTrade] = []
-    @Published private(set) var candles: [HLCandle] = []
-    @Published private(set) var interval: HLInterval = .m15
-    @Published private(set) var grouping: HLBookGrouping = .full
+    private(set) var markets: [HLMarket] = []
+    private(set) var coin: String
+    private(set) var ctx: HLAssetCtx?
+    private(set) var book: HLBook?
+    private(set) var trades: [HLTrade] = []
+    private(set) var candles: [HLCandle] = []
+    private(set) var interval: HLInterval = .m15
+    private(set) var grouping: HLBookGrouping = .full
 
     // Connection
-    @Published private(set) var connection: HLConnectionState = .connecting
-    @Published private(set) var latencyMs: Int?
-    @Published private(set) var errorMessage: String?
+    private(set) var connection: HLConnectionState = .connecting
+    private(set) var latencyMs: Int?
+    private(set) var errorMessage: String?
 
     // Chart inspection
     /// Open time of the inspected candle; `nil` follows the live candle.
-    @Published private(set) var cursorTime: Int64?
-    @Published private(set) var candlePitch: CGFloat = 8
+    private(set) var cursorTime: Int64?
+    private(set) var candlePitch: CGFloat = 8
     /// Candles scrolled back from the live one; 0 keeps the newest candle at the right edge.
-    @Published private(set) var chartOffset: CGFloat = 0
-    @Published private(set) var priceZoom: CGFloat = 1
-    @Published private(set) var pricePan: CGFloat = 0
-    @Published var chartSettings = ChartSettings.load() {
+    private(set) var chartOffset: CGFloat = 0
+    private(set) var priceZoom: CGFloat = 1
+    private(set) var pricePan: CGFloat = 0
+    var chartSettings = ChartSettings.load() {
         didSet { if chartSettings != oldValue { chartSettings.save() } }
     }
     /// Horizontal lines marked on this coin's chart.
-    @Published private(set) var priceLines: [Double] = []
+    private(set) var priceLines: [Double] = []
     /// Width of this tab's order ticket and book column. Each market tab keeps its own.
-    @Published private(set) var sideWidth = 300.0
+    private(set) var sideWidth = 300.0
 
     /// Set when the tab shows a Solana token instead of a Hyperliquid perp. `coin` is then its symbol.
     let solana: SolanaToken?
     /// Liquidity, market cap and holders: the Solana header's figures.
-    @Published private(set) var solanaStats: SolanaStats?
+    private(set) var solanaStats: SolanaStats?
     /// True while swaps are arriving over the socket rather than only by polling.
-    @Published private(set) var isSolanaStreaming = false
+    private(set) var isSolanaStreaming = false
     /// When the newest swap folded into the candles happened.
     private var lastSwapTime: Int64 = 0
     /// The last three swap prices as they came, for telling a stray print from a move.
@@ -64,17 +69,17 @@ final class PerpsModel: ObservableObject {
         UserDefaults.standard.set(width, forKey: "layout.sideWidth.\(storageKey)")
     }
     /// Trend lines and rays drawn on this coin's chart.
-    @Published private(set) var drawings: [ChartDrawing] = []
+    private(set) var drawings: [ChartDrawing] = []
     /// The drawing tool armed for the next drag or click; it disarms after one use.
-    @Published private(set) var drawTool: DrawTool?
-    @Published private(set) var isLoadingHistory = false
+    private(set) var drawTool: DrawTool?
+    private(set) var isLoadingHistory = false
 
     // Overlays
-    @Published var isHelpOpen = false
+    var isHelpOpen = false
     /// Bumped to move the keyboard into the order ticket's size field.
-    @Published var ticketFocusRequest = 0
+    var ticketFocusRequest = 0
     /// Set by ⇧B / ⇧S; the order ticket sends the order it describes. The count makes repeats distinct.
-    @Published private(set) var orderHotkey: OrderHotkey?
+    private(set) var orderHotkey: OrderHotkey?
 
     struct OrderHotkey: Equatable {
         let isBuy: Bool
@@ -86,6 +91,33 @@ final class PerpsModel: ObservableObject {
     }
 
     private var streamTask: Task<Void, Never>?
+    private var pendingEvents: [HLEvent] = []
+    private var eventFlush: Task<Void, Never>?
+
+    /// Live data arrives many times a second, and every piece that changes redraws part of the pane.
+    /// It is gathered and shown together ten times a second: nothing is dropped, and the screen is drawn once per batch.
+    private func enqueue(_ event: HLEvent) {
+        switch event {
+        case .connection, .latency:
+            apply(event)
+        default:
+            pendingEvents.append(event)
+            guard eventFlush == nil else { return }
+            eventFlush = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self else { return }
+                self.eventFlush = nil
+                let batch = self.pendingEvents
+                self.pendingEvents.removeAll(keepingCapacity: true)
+                // Only the newest order book of the batch matters; trades and candles are all applied, in order.
+                let lastBook = batch.lastIndex { if case .book = $0 { true } else { false } }
+                for (index, event) in batch.enumerated() {
+                    if case .book = event, index != lastBook { continue }
+                    self.apply(event)
+                }
+            }
+        }
+    }
     private var candleTask: Task<Void, Never>?
     private var marketsTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
@@ -97,12 +129,12 @@ final class PerpsModel: ObservableObject {
     /// Opens a link from the token's details in a web tab.
     var onOpenLink: ((URL) -> Void)?
     /// A short line shown over the chart for a few seconds: what a key or menu just did.
-    @Published private(set) var notice: String?
+    private(set) var notice: String?
     private var noticeTask: Task<Void, Never>?
     /// Where the chart was right-clicked, and the price there: its menu is open while this is set.
-    @Published var chartMenu: ChartMenuRequest?
+    var chartMenu: ChartMenuRequest?
     /// What a Solana token is beyond its price: safety figures and links.
-    @Published private(set) var solanaDetails: SolanaTokenDetails?
+    private(set) var solanaDetails: SolanaTokenDetails?
 
     struct ChartMenuRequest: Equatable {
         let point: CGPoint
@@ -460,7 +492,7 @@ final class PerpsModel: ObservableObject {
         streamTask = Task { [weak self] in
             for await event in HyperliquidSocket.events(subscriptions) {
                 guard !Task.isCancelled else { return }
-                self?.apply(event)
+                self?.enqueue(event)
             }
         }
     }
@@ -625,7 +657,7 @@ final class PerpsModel: ObservableObject {
 
         case let .book(book):
             guard book.coin == coin else { return }
-            self.book = book
+            if self.book != book { self.book = book }
 
         case let .trades(batch):
             let known = Set(trades.prefix(Self.maxTrades).map(\.tid))

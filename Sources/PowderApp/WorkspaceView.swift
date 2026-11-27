@@ -380,7 +380,7 @@ private struct TabCell: View {
 
 /// Coin and live mid for a market tab; observes the tab's model so a market switch retitles it.
 private struct MarketTabLabel: View {
-    @ObservedObject var model: PerpsModel
+    let model: PerpsModel
     @ObservedObject var directory: MarketDirectory
 
     var body: some View {

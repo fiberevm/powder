@@ -148,6 +148,9 @@ final class WalletProvider: ObservableObject {
     @Published private(set) var accounts: [UUID: HLAccountState] = [:]
     @Published private(set) var accountErrors: [UUID: String] = [:]
 
+    /// Where orders look up a market's index. Held here so views that only cancel orders need not watch every price tick.
+    weak var directory: MarketDirectory?
+
     /// Solana wallets and swaps. Its changes are republished here, so views watching this provider follow both.
     let solana: SolanaWalletProvider
     private var solanaChanges: AnyCancellable?
@@ -564,7 +567,8 @@ final class WalletProvider: ObservableObject {
 
     /// Cancels resting orders: every wallet's, or one wallet's, on every market or one. One request per wallet.
     /// Returns a line saying what happened.
-    func cancelAll(walletID: UUID? = nil, coin: String? = nil, directory: MarketDirectory) async -> String {
+    func cancelAll(walletID: UUID? = nil, coin: String? = nil) async -> String {
+        guard let directory else { return "Markets are still loading" }
         var cancelled = 0
         var failures: [String] = []
         for wallet in wallets where walletID == nil || wallet.id == walletID {
