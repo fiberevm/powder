@@ -224,7 +224,7 @@ struct SettingsView: View {
                 switch section {
                 case .wallets: WalletSettingsPane()
                 case .appearance: AppearancePane(router: router)
-                case .data: CodexSettingsPane()
+                case .data: DataSettingsPane()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -397,7 +397,7 @@ private struct WalletSettingsPane: View {
         VStack(alignment: .leading, spacing: 14) {
             PaneTitle(
                 title: "No wallets yet",
-                subtitle: "Create a new wallet to generate a key on this Mac, or import a private key you already have. Keys are stored in your macOS Keychain and never leave this computer; only signed orders are sent."
+                subtitle: "Create a new wallet to generate a key on this Mac, or import a private key you already have. One key gives a Hyperliquid address and a Solana address. Keys are stored in your macOS Keychain and never leave this computer; only signed orders are sent."
             )
             if let errorMessage { errorText(errorMessage) }
         }
@@ -414,7 +414,7 @@ private struct WalletSettingsPane: View {
                 TermTextField(placeholder: "Wallet \(wallets.wallets.count + 1)", text: $importName)
             }
             SettingRow(label: "Private key") {
-                TermTextField(placeholder: "64 hex characters, with or without 0x", text: $importKey, isSecure: true)
+                TermTextField(placeholder: "64 hex characters, or a Solana wallet's exported key", text: $importKey, isSecure: true)
             }
             if let errorMessage { errorText(errorMessage) }
             HStack(spacing: 8) {
@@ -462,6 +462,8 @@ private struct WalletSettingsPane: View {
                     TermTextField(placeholder: "Name", text: binding(\.name))
                 }
 
+                SectionHeading(title: "Hyperliquid", subtitle: "Perps and spot on Hyperliquid, traded with this key.")
+
                 SettingRow(label: "Address") {
                     HStack(spacing: 8) {
                         Text(wallet.address)
@@ -476,8 +478,6 @@ private struct WalletSettingsPane: View {
                 SettingRow(label: "Trades for account", note: accountNote(wallet)) {
                     TermTextField(placeholder: "empty = this wallet's own account", text: binding(\.accountAddress))
                 }
-
-                TermRule()
 
                 SettingRow(label: "Leverage", note: "Set on a market before this wallet's first order there; capped at each market's maximum.") {
                     HStack(spacing: 10) {
@@ -510,7 +510,50 @@ private struct WalletSettingsPane: View {
                     }
                 }
 
-                TermRule()
+                SectionHeading(title: "Solana", subtitle: "Token swaps on Solana, signed with the same key.")
+
+                SettingRow(label: "Address", note: "The same private key, as a Solana address. Send SOL here to trade Solana tokens.") {
+                    HStack(spacing: 8) {
+                        Text(wallet.solanaAddress ?? "…")
+                            .font(Term.font(11.5))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let address = wallet.solanaAddress {
+                            TermButton("COPY") { copy(address) }
+                        }
+                    }
+                }
+
+                SettingRow(label: "Slippage", note: "A swap fails instead of filling when the price moves further than this.") {
+                    HStack(spacing: 6) {
+                        TermNumberField(value: binding(\.solana.slippagePercent), range: 0.01...50, width: 70)
+                        Text("%").font(Term.font(12)).foregroundStyle(.secondary)
+                    }
+                }
+
+                SettingRow(label: "Tip", note: "Paid to Nozomi when a swap lands. Its minimum is 0.001 SOL; below that a swap is dropped. A higher tip lands sooner in a busy market.") {
+                    HStack(spacing: 6) {
+                        TermNumberField(value: binding(\.solana.tipSOL), range: 0.001...1)
+                        Text("SOL").font(Term.font(12)).foregroundStyle(.secondary)
+                    }
+                }
+
+                SettingRow(label: "Priority fee", note: "Paid to the network itself. Nozomi suggests keeping this small and bidding with the tip.") {
+                    HStack(spacing: 6) {
+                        TermNumberField(value: binding(\.solana.prioritySOL), range: 0...0.01)
+                        Text("SOL").font(Term.font(12)).foregroundStyle(.secondary)
+                    }
+                }
+
+                SettingRow(label: "Default buy", note: "What the ticket's buy size starts at.") {
+                    HStack(spacing: 6) {
+                        TermNumberField(value: binding(\.solana.defaultBuySOL), range: 0.0001...10_000)
+                        Text("SOL").font(Term.font(12)).foregroundStyle(.secondary)
+                    }
+                }
+
+                SectionHeading(title: "Key", subtitle: "One private key for both chains.")
 
                 SettingRow(
                     label: "Private key",
@@ -527,6 +570,10 @@ private struct WalletSettingsPane: View {
                             .overlay(Rectangle().stroke(Term.rule, lineWidth: 1))
                         HStack(spacing: 8) {
                             TermButton("COPY") { copy(revealedKey) }
+                            if let solanaKey = wallets.exportSolanaKey(wallet.id) {
+                                TermButton("COPY FOR SOLANA WALLETS") { copy(solanaKey) }
+                                    .help("The same key in the base58 form Phantom and other Solana wallets import")
+                            }
                             TermButton("HIDE") { self.revealedKey = nil }
                         }
                     } else {
@@ -542,7 +589,7 @@ private struct WalletSettingsPane: View {
                 SettingRow(
                     label: "Delete",
                     note: isConfirmingDelete
-                        ? "The private key is removed from the Keychain and cannot be recovered. Funds stay on Hyperliquid, reachable only with a backup of the key."
+                        ? "The private key is removed from the Keychain and cannot be recovered. Funds stay on Hyperliquid and Solana, reachable only with a backup of the key."
                         : ""
                 ) {
                     if isConfirmingDelete {
@@ -621,16 +668,125 @@ private struct AppearancePane: View {
 
 // MARK: - Codex data
 
-private struct CodexSettingsPane: View {
+/// A titled divider inside a pane.
+private struct SectionHeading: View {
+    let title: String
+    var subtitle = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TermRule()
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title.uppercased())
+                    .font(Term.font(11, .bold))
+                    .foregroundStyle(Term.accent)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+}
+
+/// Keys and addresses for the services the whole app uses, whichever wallet is trading.
+private struct DataSettingsPane: View {
     @EnvironmentObject private var model: AppModel
 
     @State private var apiKey = ""
     @State private var statusMessage: String?
     @State private var isSaving = false
+    @State private var nozomiKey = ""
+    @State private var nozomiStatus: String?
+    @State private var hasNozomiKey = Nozomi.hasKey
+    @State private var goldRushKey = ""
+    @State private var hasGoldRushKey = LiquidationFeed.hasKey
+    @EnvironmentObject private var liquidations: LiquidationsModel
+    @AppStorage(SolanaRPC.endpointKey) private var rpc = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            PaneTitle(title: "Codex data", subtitle: "Solana market and launchpad data for the Launchpad tab.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                PaneTitle(title: "Data", subtitle: "Services shared by every wallet. Trading settings are per wallet, under Wallets.")
+                codex
+                SectionHeading(title: "Nozomi", subtitle: "Lands Solana swaps.")
+                SettingRow(
+                    label: "API key",
+                    note: hasNozomiKey
+                        ? "A key is stored in your Keychain. Swaps are sent through nozomi.temporal.xyz with each wallet's tip. Enter a new value only to replace it."
+                        : "Without a key, swaps go through the Solana RPC below, which is slower and lands less reliably. Get a key at dashboard.nozomi.temporal.xyz."
+                ) {
+                    HStack(spacing: 8) {
+                        TermTextField(placeholder: "Paste your Nozomi API key", text: $nozomiKey, isSecure: true)
+                        TermButton("SAVE", kind: .primary) {
+                            do {
+                                try KeychainStore.nozomi.saveAPIKey(nozomiKey)
+                                nozomiKey = ""
+                                hasNozomiKey = Nozomi.hasKey
+                                nozomiStatus = nil
+                            } catch {
+                                nozomiStatus = error.localizedDescription
+                            }
+                        }
+                        .disabled(nozomiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if hasNozomiKey {
+                            TermButton("REMOVE", kind: .danger) {
+                                KeychainStore.nozomi.deleteAPIKey()
+                                hasNozomiKey = false
+                            }
+                        }
+                    }
+                    if let nozomiStatus {
+                        Text(nozomiStatus).font(.system(size: 11)).foregroundStyle(PowderPalette.riskCoral)
+                    }
+                }
+
+                SectionHeading(title: "GoldRush", subtitle: "Market-wide Hyperliquid liquidations, for the Liquidations tab.")
+                SettingRow(
+                    label: "API key",
+                    note: hasGoldRushKey
+                        ? "A key is stored in your Keychain and sent only to hypercore.goldrushdata.com. Enter a new value only to replace it."
+                        : "Hyperliquid's own API reports liquidations per account only. GoldRush streams all of them; get a key at goldrush.dev. The stream is billed in GoldRush credits while the tab is open."
+                ) {
+                    HStack(spacing: 8) {
+                        TermTextField(placeholder: "Paste your GoldRush API key", text: $goldRushKey, isSecure: true)
+                        TermButton("SAVE", kind: .primary) {
+                            try? LiquidationFeed.keychain.saveAPIKey(goldRushKey)
+                            goldRushKey = ""
+                            hasGoldRushKey = LiquidationFeed.hasKey
+                            liquidations.restart()
+                        }
+                        .disabled(goldRushKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if hasGoldRushKey {
+                            TermButton("REMOVE", kind: .danger) {
+                                LiquidationFeed.keychain.deleteAPIKey()
+                                hasGoldRushKey = false
+                                liquidations.restart()
+                            }
+                        }
+                    }
+                }
+
+                SectionHeading(title: "Solana RPC", subtitle: "Balances and confirmations.")
+                SettingRow(label: "Address", note: "Empty uses the public api.mainnet-beta.solana.com, which is rate limited.") {
+                    TermTextField(placeholder: SolanaRPC.defaultEndpoint, text: $rpc)
+                }
+            }
+            .padding(24)
+        }
+        .onAppear {
+            if model.hasAPIKey {
+                statusMessage = "A Codex API key is already stored. Enter a new value only to replace it."
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var codex: some View {
+        Group {
+            SectionHeading(title: "Codex", subtitle: "Solana prices, charts, search and the Launchpad tab.")
 
             SettingRow(
                 label: "API key",
@@ -656,12 +812,6 @@ private struct CodexSettingsPane: View {
                         statusMessage = "The key was removed. Powder is using demo data."
                     }
                 }
-            }
-        }
-        .padding(24)
-        .onAppear {
-            if model.hasAPIKey {
-                statusMessage = "A Codex API key is already stored. Enter a new value only to replace it."
             }
         }
     }

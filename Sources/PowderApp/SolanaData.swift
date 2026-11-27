@@ -35,6 +35,40 @@ struct SolanaStats: Equatable, Sendable {
     let holders: Int?
     /// The token's most liquid pool; its swaps are the trades tape.
     let pairAddress: String?
+    /// The exchange that pool is on ("Raydium", "Orca", "Pump"), then the others the token trades on.
+    var exchanges: [String] = []
+    var imageURL: URL?
+    var decimals: Int?
+
+    /// Where the token mostly trades.
+    var exchange: String? { exchanges.first }
+
+    /// The main exchange with a count of the rest: "Orca +5".
+    var exchangeLabel: String? {
+        exchange.map { exchanges.count > 1 ? "\($0) +\(exchanges.count - 1)" : $0 }
+    }
+}
+
+/// What a token is beyond its price: who can still change it, how concentrated it is, and where to read about it.
+struct SolanaTokenDetails: Equatable, Sendable {
+    /// The address that can still mint more, or nil when that was given up.
+    var mintAuthority: String?
+    /// The address that can freeze holders' tokens, or nil when that was given up.
+    var freezeAuthority: String?
+    /// Share of supply held by the ten largest holders, in percent.
+    var top10Percent: Double?
+    var isScam = false
+    var createdAt: Date?
+    var creator: String?
+    var description = ""
+    /// In display order: X, website, Telegram, Discord.
+    var links: [(label: String, url: URL)] = []
+
+    static func == (lhs: SolanaTokenDetails, rhs: SolanaTokenDetails) -> Bool {
+        lhs.mintAuthority == rhs.mintAuthority && lhs.freezeAuthority == rhs.freezeAuthority && lhs.top10Percent == rhs.top10Percent
+            && lhs.isScam == rhs.isScam && lhs.createdAt == rhs.createdAt && lhs.creator == rhs.creator
+            && lhs.description == rhs.description && lhs.links.map(\.url) == rhs.links.map(\.url)
+    }
 }
 
 /// Solana market data from Codex (codex.io), using the API key saved in Settings.
@@ -52,9 +86,10 @@ enum SolanaAPI {
     static var hasKey: Bool { KeychainStore().readAPIKey() != nil }
 
     private static let resultFields = """
-    token { address name symbol }
+    token { address name symbol decimals info { imageThumbUrl imageSmallUrl } }
     priceUSD change24 volume24 liquidity marketCap holders
-    pair { address }
+    pair { address exchangeHash }
+    exchanges { name address }
     """
 
     /// Tokens matching a name, symbol or address, most traded first.
@@ -70,6 +105,52 @@ enum SolanaAPI {
         return results(in: data)
     }
 
+    static func details(address: String) async throws -> SolanaTokenDetails? {
+        let query = """
+        query($tokens: [String]) {
+          filterTokens(tokens: $tokens, limit: 1) {
+            results { token {
+              isScam mintable freezable top10HoldersPercent createdAt creatorAddress
+              socialLinks { twitter website telegram discord }
+              info { description }
+            } }
+          }
+        }
+        """
+        let data = try await post(query, variables: ["tokens": ["\(address):\(network)"]])
+        let rows = (data["filterTokens"] as? [String: Any])?["results"] as? [[String: Any]] ?? []
+        guard let token = rows.first?["token"] as? [String: Any] else { return nil }
+        var details = SolanaTokenDetails()
+        details.mintAuthority = token["mintable"] as? String
+        details.freezeAuthority = token["freezable"] as? String
+        details.top10Percent = (token["top10HoldersPercent"] as? NSNumber)?.doubleValue
+        details.isScam = token["isScam"] as? Bool ?? false
+        details.createdAt = (token["createdAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        details.creator = token["creatorAddress"] as? String
+        details.description = (token["info"] as? [String: Any])?["description"] as? String ?? ""
+        let social = token["socialLinks"] as? [String: Any] ?? [:]
+        for (label, key) in [("X", "twitter"), ("WEB", "website"), ("TELEGRAM", "telegram"), ("DISCORD", "discord")] {
+            // Only real web links: the page is shown inside the app.
+            if let text = social[key] as? String, let url = URL(string: text), url.scheme == "https" || url.scheme == "http" {
+                details.links.append((label, url))
+            }
+        }
+        return details
+    }
+
+    /// The most traded tokens with real liquidity behind them, for the palette before anything is typed.
+    static func top(limit: Int = 40) async throws -> [SolanaStats] {
+        let query = """
+        query($limit: Int) {
+          filterTokens(filters: { network: [\(network)], liquidity: { gt: 100000 } }, rankings: { attribute: volume24, direction: DESC }, limit: $limit) {
+            results { \(resultFields) }
+          }
+        }
+        """
+        let data = try await post(query, variables: ["limit": limit])
+        return results(in: data)
+    }
+
     static func stats(address: String) async throws -> SolanaStats? {
         let query = """
         query($tokens: [String]) {
@@ -80,16 +161,101 @@ enum SolanaAPI {
         return results(in: data).first
     }
 
+    /// Live figures for several tokens at once (at most 200).
+    static func stats(addresses: [String]) async throws -> [SolanaStats] {
+        guard !addresses.isEmpty else { return [] }
+        let query = """
+        query($tokens: [String], $limit: Int) {
+          filterTokens(tokens: $tokens, limit: $limit) { results { \(resultFields) } }
+        }
+        """
+        let data = try await post(query, variables: ["tokens": addresses.map { "\($0):\(network)" }, "limit": min(addresses.count, 200)])
+        return results(in: data)
+    }
+
+    /// A wallet's latest swaps of any token, newest first, as raw events.
+    static func makerEvents(maker: String, limit: Int = 200) async throws -> [[String: Any]] {
+        let query = """
+        query($maker: String!, $limit: Int) {
+          getTokenEventsForMaker(query: { maker: $maker, networkId: \(network), eventType: Swap }, limit: $limit, direction: DESC) {
+            items {
+              timestamp token0Address token1Address quoteToken eventDisplayType transactionHash
+              data { ... on SwapEventData { amount0 amount1 priceUsdTotal amountNonLiquidityToken } }
+            }
+          }
+        }
+        """
+        let data = try await post(query, variables: ["maker": maker, "limit": limit])
+        return ((data["getTokenEventsForMaker"] as? [String: Any])?["items"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+    }
+
+    /// A wallet's swaps of one token, as signed amounts with their dollar value. The latest 400.
+    static func trades(maker: String, mint: String, decimals: Int) async throws -> [SolanaTrade] {
+        let query = """
+        query($maker: String!, $token: String, $cursor: String) {
+          getTokenEventsForMaker(query: { maker: $maker, networkId: \(network), tokenAddress: $token, eventType: Swap },
+                                 limit: 200, cursor: $cursor, direction: DESC) {
+            cursor
+            items {
+              timestamp token0Address token1Address quoteToken eventDisplayType
+              data { ... on SwapEventData { amount0 amount1 priceUsdTotal amountNonLiquidityToken } }
+            }
+          }
+        }
+        """
+        var trades: [SolanaTrade] = []
+        var cursor: String?
+        for _ in 0..<2 {
+            var variables: [String: Any] = ["maker": maker, "token": mint]
+            if let cursor { variables["cursor"] = cursor }
+            let page = (try await post(query, variables: variables))["getTokenEventsForMaker"] as? [String: Any]
+            let items = page?["items"] as? [Any] ?? []
+            trades += items.compactMap { trade(in: $0 as? [String: Any] ?? [:], mint: mint, decimals: decimals) }
+            cursor = page?["cursor"] as? String
+            if cursor == nil || items.count < 200 { break }
+        }
+        return trades
+    }
+
+    /// Pool amounts are from the pool's side: what it paid out is negative, and is what the wallet received.
+    static func trade(in item: [String: Any], mint: String, decimals: Int) -> SolanaTrade? {
+        guard let swap = item["data"] as? [String: Any] else { return nil }
+        let usd = number(swap["priceUsdTotal"])
+        let side = item["token0Address"] as? String == mint ? "0" : (item["token1Address"] as? String == mint ? "1" : nil)
+        guard let side, usd > 0 else { return nil }
+        var amount = -number(swap["amount\(side)"]) / pow(10, Double(decimals))
+        if amount == 0, item["quoteToken"] as? String == "token\(side)" {
+            // Some pools report no raw amounts; the priced token's size and direction are still given.
+            let isBuy = (item["eventDisplayType"] as? String ?? "").lowercased().contains("buy")
+            amount = abs(number(swap["amountNonLiquidityToken"])) * (isBuy ? 1 : -1)
+        }
+        guard amount != 0 else { return nil }
+        return SolanaTrade(amount: amount, usd: usd, time: Int(number(item["timestamp"])))
+    }
+
     private static func results(in data: [String: Any]) -> [SolanaStats] {
         let rows = (data["filterTokens"] as? [String: Any])?["results"] as? [[String: Any]] ?? []
         return rows.compactMap { row in
             guard let token = row["token"] as? [String: Any], let address = token["address"] as? String else { return nil }
+            let info = token["info"] as? [String: Any]
+            let pair = row["pair"] as? [String: Any]
+            // The top pool's exchange first: it is where the price and the tape come from.
+            let listed = (row["exchanges"] as? [[String: Any]] ?? []).filter { !(($0["name"] as? String) ?? "").isEmpty }
+            let home = pair?["exchangeHash"] as? String
+            var exchanges: [String] = []
+            for exchange in listed.filter({ $0["address"] as? String == home }) + listed {
+                if let name = exchange["name"] as? String, !exchanges.contains(name) { exchanges.append(name) }
+            }
+            let image = (info?["imageThumbUrl"] as? String ?? info?["imageSmallUrl"] as? String).flatMap(URL.init)
             return SolanaStats(
                 token: SolanaToken(address: address, symbol: token["symbol"] as? String ?? "?", name: token["name"] as? String ?? ""),
                 price: number(row["priceUSD"]), change24: number(row["change24"]), volume24: number(row["volume24"]),
                 liquidity: number(row["liquidity"]), marketCap: number(row["marketCap"]),
                 holders: (row["holders"] as? NSNumber)?.intValue,
-                pairAddress: (row["pair"] as? [String: Any])?["address"] as? String
+                pairAddress: pair?["address"] as? String,
+                exchanges: exchanges,
+                imageURL: image,
+                decimals: (token["decimals"] as? NSNumber)?.intValue
             )
         }
     }
@@ -127,31 +293,53 @@ enum SolanaAPI {
     }
 
     /// The pool's latest swaps, newest first. Size is in tokens.
-    static func trades(pair: String, symbol: String, limit: Int = 60) async throws -> [HLTrade] {
+    /// A pool prices one of its two tokens; with the mint and its decimals the swap is read from this token's side whichever it is.
+    static func trades(pair: String, symbol: String, mint: String? = nil, decimals: Int? = nil, limit: Int = 60) async throws -> [HLTrade] {
         let query = """
         query($address: String!, $limit: Int) {
           getTokenEvents(query: { address: $address, networkId: \(network), eventType: Swap }, limit: $limit, direction: DESC) {
             items {
-              id timestamp eventDisplayType
-              data { ... on SwapEventData { priceUsd priceUsdTotal amountNonLiquidityToken } }
+              timestamp eventDisplayType token0Address token1Address quoteToken transactionHash
+              data { ... on SwapEventData { priceUsd priceUsdTotal amountNonLiquidityToken amount0 amount1 } }
             }
           }
         }
         """
         let data = try await post(query, variables: ["address": pair, "limit": limit])
         let items = (data["getTokenEvents"] as? [String: Any])?["items"] as? [Any] ?? []
-        return items.compactMap { item in
-            guard let item = item as? [String: Any], let swap = item["data"] as? [String: Any] else { return nil }
-            let price = number(swap["priceUsd"])
-            var size = abs(number(swap["amountNonLiquidityToken"]))
-            if size == 0, price > 0 { size = number(swap["priceUsdTotal"]) / price }
-            guard price > 0, size > 0 else { return nil }
-            let id = item["id"] as? String ?? "\(item["timestamp"] ?? 0)\(price)\(size)"
+        return items.compactMap { tapeTrade($0, symbol: symbol, mint: mint, decimals: decimals) }
+    }
+
+    /// Swaps pushed by the pool's live subscription, in the same form as `trades`.
+    static func liveTrades(in payload: Data, symbol: String, mint: String?, decimals: Int?) throws -> [HLTrade] {
+        guard let root = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return [] }
+        if let errors = root["errors"] as? [[String: Any]], let message = errors.first?["message"] as? String {
+            throw CodexError.graphQL(message)
+        }
+        let data = root["data"] as? [String: Any]
+        let events = ((data?["onTokenEventsCreated"] ?? data?["onEventsCreated"]) as? [String: Any])?["events"] as? [Any] ?? []
+        return events.compactMap { tapeTrade($0, symbol: symbol, mint: mint, decimals: decimals) }
+    }
+
+    private static func tapeTrade(_ item: Any, symbol: String, mint: String?, decimals: Int?) -> HLTrade? {
+        guard let item = item as? [String: Any], let swap = item["data"] as? [String: Any] else { return nil }
+        // One transaction can hold several swaps in the pool, so the amounts are part of what tells them apart.
+        let id = "\(item["transactionHash"] ?? "")|\(item["timestamp"] ?? 0)|\(swap["amount0"] ?? "")|\(swap["amount1"] ?? "")|\(swap["priceUsdTotal"] ?? "")"
+        if let mint, let decimals {
+            guard let own = trade(in: item, mint: mint, decimals: decimals) else { return nil }
             return HLTrade(
-                tid: stableID(id), coin: symbol, isBuy: (item["eventDisplayType"] as? String ?? "").lowercased().contains("buy"),
-                px: price, sz: size, time: Int64(number(item["timestamp"])) * 1_000
+                tid: stableID(id), coin: symbol, isBuy: own.amount > 0,
+                px: own.usd / abs(own.amount), sz: abs(own.amount), time: Int64(own.time) * 1_000
             )
         }
+        let price = number(swap["priceUsd"])
+        var size = abs(number(swap["amountNonLiquidityToken"]))
+        if size == 0, price > 0 { size = number(swap["priceUsdTotal"]) / price }
+        guard price > 0, size > 0 else { return nil }
+        return HLTrade(
+            tid: stableID(id), coin: symbol, isBuy: (item["eventDisplayType"] as? String ?? "").lowercased().contains("buy"),
+            px: price, sz: size, time: Int64(number(item["timestamp"])) * 1_000
+        )
     }
 
     /// FNV-1a, so the same swap gets the same id on every poll.

@@ -3,6 +3,9 @@ import SwiftUI
 struct PerpsView: View {
     @ObservedObject var model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
+    @EnvironmentObject private var alerts: AlertStore
+    @EnvironmentObject private var triggers: SolanaTriggerStore
+    @EnvironmentObject private var directory: MarketDirectory
 
     /// Below this width the book and trades move under the chart instead of beside it.
     private static let wideThreshold: CGFloat = 760
@@ -28,7 +31,9 @@ struct PerpsView: View {
                         }
                         VStack(spacing: 0) {
                             if model.solana != nil {
-                                // No order book on a Solana pool: the column is the token's figures and its swaps.
+                                // No order book on a Solana pool: the column is the ticket, the token's figures and its swaps.
+                                SolanaTicket(model: model)
+                                TermRule()
                                 SolanaInfoPanel(model: model)
                                 TermRule()
                                 trades
@@ -53,8 +58,14 @@ struct PerpsView: View {
                     }
                     HStack(alignment: .top, spacing: 0) {
                         if model.solana != nil {
-                            SolanaInfoPanel(model: model)
-                                .frame(width: min(max(geometry.size.width * 0.38, 220), 300))
+                            ScrollView {
+                                VStack(spacing: 0) {
+                                    SolanaTicket(model: model)
+                                    TermRule()
+                                    SolanaInfoPanel(model: model)
+                                }
+                            }
+                            .frame(width: min(max(geometry.size.width * 0.38, 220), 300))
                             TermRule(vertical: true)
                             trades
                         } else {
@@ -89,8 +100,166 @@ struct PerpsView: View {
         .onDisappear { model.pause() }
     }
 
+    private var marketRef: MarketRef { model.solana.map(MarketRef.solana) ?? .perp(model.coin) }
+
+    /// The selected wallet's resting orders in this market.
+    private var restingOrders: [HLOpenOrder] {
+        guard model.solana == nil, let id = wallets.selectedID else { return [] }
+        return wallets.accounts[id]?.orders.filter { $0.coin == model.coin } ?? []
+    }
+
+    /// Everything of the user's drawn across the chart: position, resting orders, alerts.
+    private var chartLevels: [ChartLevel] {
+        var levels = positionLevels
+        for order in restingOrders {
+            levels.append(ChartLevel(
+                kind: order.isBuy ? .orderBuy : .orderSell, price: order.price,
+                label: "\(order.isBuy ? "BUY" : "SELL") \(HLWire.number(order.size)) · LIMIT"
+            ))
+        }
+        for alert in alerts.alerts(for: marketRef) {
+            levels.append(ChartLevel(kind: .alert, price: alert.price, label: "ALERT \(alert.isAbove ? "↑" : "↓")"))
+        }
+        if let token = model.solana {
+            for trigger in triggers.active(walletID: wallets.selectedID, mint: token.address) {
+                levels.append(ChartLevel(
+                    kind: trigger.kind == .stopLoss ? .stopLoss : .takeProfit, price: trigger.price,
+                    label: "\(trigger.kind.title.uppercased()) · SELL ALL"
+                ))
+            }
+        }
+        return levels
+    }
+
+    private func closeChartMenu() {
+        model.chartMenu = nil
+        DropdownCenter.dismiss = nil
+    }
+
+    /// What a right-click on the chart offers at that price.
+    private var chartMenuItems: [DropdownItem] {
+        guard let request = model.chartMenu else { return [] }
+        let price = request.price
+        let shown = HLFormat.price(price, decimals: model.priceDecimals)
+        var items: [DropdownItem] = []
+
+        // Lines under the pointer come first: what is there can be taken away.
+        for order in restingOrders where abs(order.price - price) <= request.tolerance {
+            items.append(DropdownItem("Cancel \(order.isBuy ? "buy" : "sell") \(HLWire.number(order.size)) at \(HLFormat.price(order.price, decimals: model.priceDecimals))", id: "cancel:\(order.id)") {
+                closeChartMenu()
+                cancel(order)
+            })
+        }
+        for alert in alerts.alerts(for: marketRef) where abs(alert.price - price) <= request.tolerance {
+            items.append(DropdownItem("Remove alert at \(HLFormat.price(alert.price, decimals: model.priceDecimals))", id: "alert:\(alert.id)") {
+                closeChartMenu()
+                alerts.remove(alert.id)
+            })
+        }
+
+        if let wallet = wallets.selected, let market = model.market, price > 0 {
+            // A limit order of the wallet's default size, resting at the clicked price.
+            let size = HLWire.size(wallet.settings.defaultSizeUSD / price, szDecimals: market.szDecimals)
+            let amount = "\(HLWire.number(size)) \(model.coin)"
+            for isBuy in [true, false] {
+                items.append(DropdownItem(
+                    "\(isBuy ? "Buy" : "Sell") limit \(amount) at \(shown)", id: isBuy ? "buy" : "sell",
+                    detail: "$" + HLFormat.price(size * price, decimals: 0), isDisabled: size <= 0, startsSection: isBuy && !items.isEmpty
+                ) {
+                    closeChartMenu()
+                    placeLimit(wallet: wallet, market: market, isBuy: isBuy, size: size, price: price)
+                })
+            }
+        }
+        if let token = model.solana, let id = wallets.selectedID {
+            for trigger in triggers.active(walletID: id, mint: token.address) where abs(trigger.price - price) <= request.tolerance {
+                items.append(DropdownItem("Remove \(trigger.kind.title.lowercased()) at \(HLFormat.price(trigger.price, decimals: model.priceDecimals))", id: "trigger:\(trigger.id)") {
+                    closeChartMenu()
+                    triggers.remove(trigger.id)
+                })
+            }
+            // Below the price a click sets the stop, above it the target. Only for something actually held.
+            if (wallets.solana.balances[id]?.holding(token.address)?.raw ?? 0) > 0, let last = model.lastPrice, price != last {
+                let kind: SolanaTrigger.Kind = price < last ? .stopLoss : .takeProfit
+                items.append(DropdownItem(
+                    "\(kind.title): sell all if price \(kind == .stopLoss ? "falls" : "rises") to \(shown)", id: "trigger",
+                    detail: HLFormat.percent(price / last - 1), startsSection: !items.isEmpty
+                ) {
+                    closeChartMenu()
+                    model.notify(triggers.set(kind, walletID: id, token: token, price: price, current: last) ?? "\(kind.title) set at \(shown)")
+                })
+            }
+        }
+        items.append(DropdownItem("Alert when price reaches \(shown)", id: "alert", detail: "🔔", startsSection: !items.isEmpty) {
+            closeChartMenu()
+            if alerts.add(marketRef, price: price, current: model.lastPrice) != nil {
+                model.notify("Alert set at \(shown)")
+            }
+        })
+        let hasLine = model.priceLines.contains { abs($0 - price) <= request.tolerance }
+        items.append(DropdownItem(hasLine ? "Remove price line" : "Draw a price line here", id: "line", detail: "⌥ click") {
+            closeChartMenu()
+            model.togglePriceLine(at: price, tolerance: request.tolerance)
+        })
+        if restingOrders.count > 1 {
+            items.append(DropdownItem("Cancel all \(restingOrders.count) \(model.coin) orders", id: "cancel-all", startsSection: true) {
+                closeChartMenu()
+                Task {
+                    model.notify(await wallets.cancelAll(walletID: wallets.selectedID, coin: model.coin, directory: directory))
+                }
+            })
+        }
+        return items
+    }
+
+    private func placeLimit(wallet: Wallet, market: HLMarket, isBuy: Bool, size: Double, price: Double) {
+        Task {
+            do {
+                let order = try wallets.prepare(
+                    wallet: wallet, market: market, isBuy: isBuy, size: size,
+                    limitPrice: price, referencePrice: model.lastPrice, reduceOnly: false
+                )
+                let outcome = try await wallets.send(order)
+                OrderSound.done()
+                let at = HLFormat.price(order.price, decimals: model.priceDecimals)
+                if case let .filled(filled, fill) = outcome {
+                    // A limit past the market trades at once.
+                    model.notify("Filled \(HLWire.number(filled)) \(model.coin) at \(HLFormat.price(fill, decimals: model.priceDecimals))")
+                } else {
+                    model.notify("\(isBuy ? "Buy" : "Sell") limit \(HLWire.number(order.size)) \(model.coin) resting at \(at)")
+                }
+            } catch {
+                OrderSound.failed()
+                model.notify(error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancel(_ order: HLOpenOrder) {
+        guard let market = model.market, let id = wallets.selectedID else { return }
+        Task {
+            do {
+                try await wallets.cancel(order, asset: market.index, walletID: id)
+                model.notify("Order cancelled")
+            } catch {
+                model.notify(error.localizedDescription)
+            }
+        }
+    }
+
     /// Entry and liquidation of the selected wallet's position in this market.
     private var positionLevels: [ChartLevel] {
+        if let token = model.solana {
+            // A Solana holding: one line at the average price paid, with what it is worth against that.
+            let solana = wallets.solana
+            guard let id = solana.selectedID, let holding = solana.balances[id]?.holding(token.address),
+                  let cost = solana.costs[SolanaWalletProvider.costKey(id, token.address)] else { return [] }
+            var label = "HOLD \(HLFormat.amount(holding.amount)) \(token.symbol) · AVG ENTRY"
+            if let price = model.lastPrice, cost > 0 {
+                label += " · \(PositionsView.signed((price - cost) * holding.amount)) (\(HLFormat.percent(price / cost - 1)))"
+            }
+            return [ChartLevel(kind: .entryLong, price: cost, label: label)]
+        }
         guard model.solana == nil, let id = wallets.selectedID,
               let position = wallets.accounts[id]?.positions.first(where: { $0.coin == model.coin }) else { return [] }
         let isLong = position.size > 0
@@ -120,12 +289,28 @@ struct PerpsView: View {
                 interval: model.interval,
                 settings: model.chartSettings,
                 priceLines: model.priceLines,
-                levels: positionLevels,
+                levels: chartLevels,
                 drawings: model.drawings,
                 drawTool: model.drawTool,
                 isLoadingHistory: model.isLoadingHistory
             )
             .equatable()
+            .termMenu(isOpen: model.chartMenu != nil, at: model.chartMenu?.point, items: chartMenuItems, minWidth: 260) { closeChartMenu() }
+            .overlay(alignment: .top) {
+                if let notice = model.notice {
+                    Text(notice)
+                        .font(Term.font(11, .semibold))
+                        .foregroundStyle(PowderPalette.graphite)
+                        .lineLimit(2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Term.accent)
+                        .padding(.top, 8)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: model.notice)
         }
     }
 
@@ -225,6 +410,7 @@ private struct MarketHeader: View {
                 Stat("MKT CAP", stats.map { "$" + HLFormat.compact($0.marketCap) } ?? "—"),
                 Stat("LIQUIDITY", stats.map { "$" + HLFormat.compact($0.liquidity) } ?? "—"),
                 Stat("24H VOL", "$" + HLFormat.compact(ctx.dayNtlVlm)),
+                Stat("EXCHANGE", stats?.exchangeLabel ?? "—"),
                 Stat("HOLDERS", stats?.holders.map { HLFormat.compact(Double($0)).replacingOccurrences(of: ".00", with: "") } ?? "—"),
             ]
         }
@@ -822,6 +1008,8 @@ private struct KeyHelp: View {
         ("g", "cycle order book grouping"),
         ("o", "type an order size (⏎ or esc leaves the field)"),
         ("⇧B  ⇧S", "buy / long and sell / short at once, with the ticket's size and wallet"),
+        ("right-click", "on the chart: limit order, alert or price line at that price; cancel what is under the pointer"),
+        ("w", "add this market to the watchlist, or remove it"),
         ("⌘R", "reconnect and reload"),
         ("?", "toggle this list"),
     ]
@@ -853,7 +1041,7 @@ private struct KeyHelp: View {
     }
 }
 
-/// The side column of a Solana token tab: what it is, where it trades, and what is not built yet.
+/// Under the ticket on a Solana token tab: what the token is and its live figures.
 private struct SolanaInfoPanel: View {
     @ObservedObject var model: PerpsModel
     @State private var copied = false
@@ -891,20 +1079,101 @@ private struct SolanaInfoPanel: View {
                 row("LIQUIDITY", "$" + HLFormat.compact(stats.liquidity))
                 row("24H VOL", "$" + HLFormat.compact(stats.volume24))
                 if let holders = stats.holders { row("HOLDERS", "\(holders)") }
+                if let exchange = stats.exchange {
+                    row("EXCHANGE", exchange)
+                    if stats.exchanges.count > 1 { row("ALSO ON", stats.exchanges.dropFirst().joined(separator: ", ")) }
+                }
             } else if !SolanaAPI.hasKey {
                 Text("Add a Codex API key in Settings ( ⌘, ) to load Solana data.")
                     .foregroundStyle(PowderPalette.riskCoral)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("Solana trading is not built yet: this tab is chart and tape only.")
-                .font(Term.font(10.5))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
+            if let details = model.solanaDetails {
+                safety(details)
+                about(details)
+            }
         }
         .font(Term.font(11.5))
         .padding(.horizontal, 12)
         .padding(.bottom, 10)
+    }
+
+    private static let good = PowderPalette.signalGreen
+    private static let bad = PowderPalette.riskCoral
+    private static let warn = PowderPalette.cautionAmber
+
+    /// The checks a buyer makes before touching a token: can it be printed or frozen, who holds it, how thin is it.
+    @ViewBuilder
+    private func safety(_ details: SolanaTokenDetails) -> some View {
+        TermRule().padding(.vertical, 2)
+        HStack {
+            Text("SAFETY").font(Term.font(11, .bold))
+            Spacer()
+            if details.isScam {
+                Text("FLAGGED AS SCAM").font(Term.font(10, .bold)).foregroundStyle(Self.bad)
+            }
+        }
+        row("MINT", details.mintAuthority == nil ? "✓ renounced" : "✗ can mint more", color: details.mintAuthority == nil ? Self.good : Self.bad)
+            .help(details.mintAuthority.map { "\($0) can create new tokens, diluting holders" } ?? "Nobody can create more of this token")
+        row("FREEZE", details.freezeAuthority == nil ? "✓ renounced" : "✗ can freeze wallets", color: details.freezeAuthority == nil ? Self.good : Self.bad)
+            .help(details.freezeAuthority.map { "\($0) can freeze a holder's tokens so they cannot be sold" } ?? "Nobody can freeze holders' tokens")
+        if let top = details.top10Percent {
+            row("TOP 10 HOLD", String(format: "%.1f%%", top), color: top < 30 ? Self.good : top < 50 ? Self.warn : Self.bad)
+                .help("Share of supply in the ten largest wallets (pools and exchanges included)")
+        }
+        if let liquidity = model.solanaStats?.liquidity {
+            row("LIQUIDITY", "$" + HLFormat.compact(liquidity), color: liquidity >= 100_000 ? Self.good : liquidity >= 10_000 ? Self.warn : Self.bad)
+                .help("Money in the pools: with little of it, a sale moves the price a long way")
+        }
+        if let created = details.createdAt {
+            let age = Date().timeIntervalSince(created)
+            row("AGE", Self.age(age), color: age >= 7 * 86_400 ? Self.good : age >= 86_400 ? Self.warn : Self.bad)
+        }
+    }
+
+    private static func age(_ seconds: TimeInterval) -> String {
+        switch seconds {
+        case ..<3_600: "\(max(Int(seconds / 60), 1)) min"
+        case ..<86_400: "\(Int(seconds / 3_600)) h"
+        case ..<(365 * 86_400): "\(Int(seconds / 86_400)) days"
+        default: String(format: "%.1f years", seconds / (365 * 86_400))
+        }
+    }
+
+    /// Links open in a Powder web tab, not the browser.
+    @ViewBuilder
+    private func about(_ details: SolanaTokenDetails) -> some View {
+        if !details.links.isEmpty || !details.description.isEmpty {
+            TermRule().padding(.vertical, 2)
+        }
+        if !details.links.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(details.links, id: \.url) { link in
+                    Button {
+                        model.onOpenLink?(link.url)
+                    } label: {
+                        Text(link.label)
+                            .font(Term.font(10, .semibold))
+                            .foregroundStyle(Term.accent)
+                            .padding(.horizontal, 6)
+                            .frame(height: 18)
+                            .overlay(Rectangle().stroke(Term.accent.opacity(0.6), lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(link.url.absoluteString)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        if !details.description.isEmpty {
+            Text(details.description)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .help(details.description)
+        }
     }
 
     private func row(_ label: String, _ value: String, color: Color = Term.foreground) -> some View {

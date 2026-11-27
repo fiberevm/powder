@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Security
 
@@ -23,6 +24,16 @@ struct Wallet: Identifiable, Codable, Equatable, Sendable {
     /// trade that account, and balances are read from it.
     var accountAddress = ""
     var settings = WalletSettings()
+    /// The same key's Solana address (base58). Filled in on first launch for wallets saved before Solana.
+    var solanaAddress: String?
+    /// Nil until changed, so wallets saved before Solana still load.
+    var solanaSettings: SolanaTradeSettings?
+
+    /// How this wallet's Solana swaps are sent.
+    var solana: SolanaTradeSettings {
+        get { solanaSettings ?? SolanaTradeSettings() }
+        set { solanaSettings = newValue }
+    }
 
     /// The account whose balance and positions this wallet trades.
     var tradingAddress: String {
@@ -122,9 +133,12 @@ enum WalletError: LocalizedError, Equatable {
 /// Names and settings are stored in user defaults; private keys only in the vault.
 @MainActor
 final class WalletProvider: ObservableObject {
-    @Published private(set) var wallets: [Wallet] = []
+    @Published private(set) var wallets: [Wallet] = [] {
+        didSet { syncSolana() }
+    }
     @Published var selectedID: UUID? {
         didSet {
+            solana.selectedID = selectedID
             guard selectedID != oldValue else { return }
             defaults.set(selectedID?.uuidString, forKey: Self.selectedKey)
             Task { await refresh() }
@@ -133,6 +147,10 @@ final class WalletProvider: ObservableObject {
     /// Balance, positions and open orders by wallet, as last fetched.
     @Published private(set) var accounts: [UUID: HLAccountState] = [:]
     @Published private(set) var accountErrors: [UUID: String] = [:]
+
+    /// Solana wallets and swaps. Its changes are republished here, so views watching this provider follow both.
+    let solana: SolanaWalletProvider
+    private var solanaChanges: AnyCancellable?
 
     private let defaults: UserDefaults
     private let vault: KeyVault
@@ -150,10 +168,36 @@ final class WalletProvider: ObservableObject {
     init(defaults: UserDefaults = .standard, vault: KeyVault = KeychainVault()) {
         self.defaults = defaults
         self.vault = vault
+        solana = SolanaWalletProvider(defaults: defaults)
         wallets = defaults.data(forKey: Self.walletsKey)
             .flatMap { try? JSONDecoder().decode([Wallet].self, from: $0) } ?? []
         let saved = defaults.string(forKey: Self.selectedKey).flatMap(UUID.init)
         selectedID = wallets.contains { $0.id == saved } ? saved : wallets.first?.id
+        solanaChanges = solana.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        solana.keySource = { [weak self] id in
+            guard let self else { throw WalletError.missingKey }
+            return try self.privateKey(for: id)
+        }
+        solana.selectedID = selectedID
+        syncSolana()
+        Task { await deriveSolanaAddresses() }
+    }
+
+    private func syncSolana() {
+        solana.sync(wallets.compactMap { wallet in
+            wallet.solanaAddress.map { SolanaWallet(id: wallet.id, name: wallet.name, address: $0, settings: wallet.solana) }
+        })
+    }
+
+    /// Wallets saved before Solana have no Solana address yet: it is worked out from the key, read off the main thread.
+    private func deriveSolanaAddresses() async {
+        for wallet in wallets where wallet.solanaAddress == nil {
+            await preloadKey(wallet.id)
+            guard let key = keyCache[wallet.id], let address = try? SolanaKey.address(of: key),
+                  let index = wallets.firstIndex(where: { $0.id == wallet.id }) else { continue }
+            wallets[index].solanaAddress = address
+            persist()
+        }
     }
 
     var selected: Wallet? { wallets.first { $0.id == selectedID } }
@@ -168,10 +212,15 @@ final class WalletProvider: ObservableObject {
         try add(key: EthKey.generate(), name: name)
     }
 
-    /// Adds an existing private key (64 hex characters, with or without `0x`).
+    /// Adds an existing private key: 64 hex characters (with or without `0x`), or a Solana wallet's
+    /// export (base58, or a keypair file's JSON array). Either way the one key serves both chains.
     @discardableResult
     func importWallet(name: String = "", privateKey: String) throws -> Wallet {
-        try add(key: EthKey.parse(privateKey), name: name)
+        if let key = try? EthKey.parse(privateKey) { return try add(key: key, name: name) }
+        guard let seed = try? SolanaKey.parse(privateKey), (try? EthKey.address(of: seed)) != nil else {
+            throw EthKeyError.invalidPrivateKey
+        }
+        return try add(key: seed, name: name)
     }
 
     private func add(key: Data, name: String) throws -> Wallet {
@@ -180,7 +229,8 @@ final class WalletProvider: ObservableObject {
             throw WalletError.duplicate(existing.name)
         }
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        let wallet = Wallet(id: UUID(), name: trimmed.isEmpty ? "Wallet \(wallets.count + 1)" : trimmed, address: address)
+        var wallet = Wallet(id: UUID(), name: trimmed.isEmpty ? "Wallet \(wallets.count + 1)" : trimmed, address: address)
+        wallet.solanaAddress = try? SolanaKey.address(of: key)
         try vault.save(key, for: wallet.id)
         keyCache[wallet.id] = key
         wallets.append(wallet)
@@ -232,6 +282,11 @@ final class WalletProvider: ObservableObject {
         (try? privateKey(for: id)).map { "0x" + $0.hex }
     }
 
+    /// The same key in the form Solana wallets import: the base58 keypair.
+    func exportSolanaKey(_ id: UUID) -> String? {
+        (try? privateKey(for: id)).flatMap { try? SolanaKey.export($0) }
+    }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(wallets) { defaults.set(data, forKey: Self.walletsKey) }
     }
@@ -266,6 +321,7 @@ final class WalletProvider: ObservableObject {
 
     private func poll() async {
         Task { await HyperliquidExchange.warm() }
+        Task { await solana.tick() }
         guard allWatchers > 0 else { return await refresh() }
         await withTaskGroup(of: Void.self) { group in
             for wallet in wallets {
@@ -277,6 +333,12 @@ final class WalletProvider: ObservableObject {
     /// Closes a holding shown in the Positions tab: a perp at market, reduce-only, or a spot
     /// balance sold for USDC. Both use the wallet's market slippage.
     func close(_ row: PositionRow, directory: MarketDirectory) async throws -> HLOrderOutcome {
+        if let mint = row.solanaMint {
+            // A Solana token is sold for SOL.
+            guard row.kind == .spot, let holding = solana.balances[row.walletID]?.holding(mint) else { return .done }
+            _ = try await solana.swap(walletID: row.walletID, input: mint, output: SolanaRPC.wrappedSOL, amount: holding.raw)
+            return row.mark.map { .filled(size: holding.amount, price: $0) } ?? .done
+        }
         guard let wallet = wallet(row.walletID) else { throw WalletError.missingKey }
         switch row.kind {
         case .cash:
@@ -318,6 +380,8 @@ final class WalletProvider: ObservableObject {
         guard let wallet = (id ?? selectedID).flatMap(wallet) else { return }
         do {
             let state = try await HyperliquidExchange.accountState(user: wallet.tradingAddress)
+            // While an order is in flight the account shows its expected result; a fetch from before it lands must not undo that.
+            guard inFlight[wallet.id, default: 0] == 0 else { return }
             if accounts[wallet.id] != state { accounts[wallet.id] = state }
             if accountErrors[wallet.id] != nil { accountErrors[wallet.id] = nil }
         } catch {
@@ -337,6 +401,8 @@ final class WalletProvider: ObservableObject {
         let price: Double
         let isMarket: Bool
         let reduceOnly: Bool
+        /// The mid when a market order was prepared: where it is shown as filled until the exchange answers.
+        var expectedPrice: Double?
     }
 
     /// Rounds a requested order. `referencePrice` is the current mid, used for market orders.
@@ -357,15 +423,45 @@ final class WalletProvider: ObservableObject {
         guard rounded > 0 else { throw WalletError.sizeTooSmall }
         return PreparedOrder(
             walletID: wallet.id, market: market, isBuy: isBuy, size: rounded,
-            price: price, isMarket: limitPrice == nil, reduceOnly: reduceOnly
+            price: price, isMarket: limitPrice == nil, reduceOnly: reduceOnly,
+            expectedPrice: limitPrice == nil ? referencePrice : nil
         )
     }
 
+    /// Orders sent and not yet answered, by wallet.
+    private var inFlight: [UUID: Int] = [:]
+
     /// Signs and sends the order, first setting the wallet's leverage on that market if it differs.
+    /// A market order shows in the account at once, at the price it was sent from; the exchange's answer
+    /// then corrects it, or takes it back out if the order was refused.
     func send(_ order: PreparedOrder) async throws -> HLOrderOutcome {
         guard let wallet = wallet(order.walletID) else { throw WalletError.missingKey }
         let started = ContinuousClock.now
         let key = try privateKey(for: wallet.id)
+
+        let before = accounts[wallet.id]
+        inFlight[wallet.id, default: 0] += 1
+        defer { inFlight[wallet.id, default: 1] -= 1 }
+        if order.isMarket, let expected = order.expectedPrice {
+            var signed = order.isBuy ? order.size : -order.size
+            if order.reduceOnly {
+                // A reduce-only order can close the position but never open the other side.
+                let held = before?.positions.first { $0.coin == order.market.name }?.size ?? 0
+                signed = signed > 0 ? min(signed, max(-held, 0)) : max(signed, min(-held, 0))
+            }
+            if signed != 0 { applyFill(walletID: wallet.id, coin: order.market.name, signedSize: signed, price: expected) }
+        }
+        do {
+            return try await deliver(order, wallet: wallet, key: key, before: before, started: started)
+        } catch {
+            if let before { accounts[wallet.id] = before }
+            throw error
+        }
+    }
+
+    private func deliver(
+        _ order: PreparedOrder, wallet: Wallet, key: Data, before: HLAccountState?, started: ContinuousClock.Instant
+    ) async throws -> HLOrderOutcome {
 
         if !order.reduceOnly {
             // Normally a no-op: the ticket has already matched the exchange's leverage in the background.
@@ -388,12 +484,18 @@ final class WalletProvider: ObservableObject {
             ),
             privateKey: key
         )
-        // The result is shown at once: the fill is applied here, and the exchange's own figures follow.
+        // The expected fill gives way to the real one: what actually filled, at the price it filled at.
+        if let before { accounts[wallet.id] = before }
         if case let .filled(size, price) = outcome {
             applyFill(walletID: wallet.id, coin: order.market.name, signedSize: order.isBuy ? size : -size, price: price)
         }
         HyperliquidExchange.log("order \(order.market.name) total=\(HyperliquidExchange.milliseconds(ContinuousClock.now - started))ms")
-        Task { await refresh(wallet.id) }
+        let id = wallet.id
+        Task {
+            // After this call returns, so the in-flight guard no longer holds the fetch back.
+            await Task.yield()
+            await refresh(id)
+        }
         return outcome
     }
 
@@ -458,6 +560,34 @@ final class WalletProvider: ObservableObject {
                 self.appliedLeverage[cacheKey] = wanted.key
             }
         }
+    }
+
+    /// Cancels resting orders: every wallet's, or one wallet's, on every market or one. One request per wallet.
+    /// Returns a line saying what happened.
+    func cancelAll(walletID: UUID? = nil, coin: String? = nil, directory: MarketDirectory) async -> String {
+        var cancelled = 0
+        var failures: [String] = []
+        for wallet in wallets where walletID == nil || wallet.id == walletID {
+            let orders = (accounts[wallet.id]?.orders ?? []).filter { coin == nil || $0.coin == coin }
+            let cancels = orders.compactMap { order in directory.markets[order.coin].map { (asset: $0.index, orderID: order.id) } }
+            guard !cancels.isEmpty else { continue }
+            do {
+                try await HyperliquidExchange.send(HLAction.cancel(cancels), privateKey: privateKey(for: wallet.id))
+                cancelled += cancels.count
+                // Gone from the list at once; the exchange's own list follows.
+                if var account = accounts[wallet.id] {
+                    let ids = Set(cancels.map(\.orderID))
+                    account.orders.removeAll { ids.contains($0.id) }
+                    accounts[wallet.id] = account
+                }
+            } catch {
+                failures.append("\(wallet.name): \(error.localizedDescription)")
+            }
+            let id = wallet.id
+            Task { await refresh(id) }
+        }
+        if !failures.isEmpty { return "Cancel failed. " + failures.joined(separator: " ") }
+        return cancelled == 0 ? "No resting orders to cancel" : "Cancelled \(cancelled) order\(cancelled == 1 ? "" : "s")"
     }
 
     func cancel(_ order: HLOpenOrder, asset: Int, walletID: UUID) async throws {

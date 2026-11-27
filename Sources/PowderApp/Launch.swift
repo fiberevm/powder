@@ -1,0 +1,34 @@
+import Foundation
+
+/// How this run was started, and how long it took to show something.
+enum Launch {
+    /// Set `POWDER_PROFILE` to run beside the real app with separate settings: a fresh layout and no wallets.
+    /// Used for measuring start-up; such a run does not replace the tool server address other agents use.
+    static let profile: String? = ProcessInfo.processInfo.environment["POWDER_PROFILE"].flatMap { $0.isEmpty ? nil : $0 }
+
+    static var defaults: UserDefaults {
+        profile.flatMap { UserDefaults(suiteName: "io.powder.app.\($0)") } ?? .standard
+    }
+
+    /// Milliseconds since the process was created, as the system records it (before any of the app's code ran).
+    static func sinceProcessStart() -> Int? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&name, 4, &info, &size, nil, 0) == 0 else { return nil }
+        let started = info.kp_proc.p_starttime
+        var now = timeval()
+        gettimeofday(&now, nil)
+        return (now.tv_sec - started.tv_sec) * 1_000 + Int(now.tv_usec - started.tv_usec) / 1_000
+    }
+
+    @MainActor private static var hasChart = false
+
+    /// Called when a chart first has candles to draw. The first one of the run is written to the log.
+    @MainActor
+    static func chartIsReady(_ coin: String, candles: Int) {
+        guard !hasChart, candles > 0, let elapsed = sinceProcessStart() else { return }
+        hasChart = true
+        HyperliquidExchange.log("launch: first chart (\(coin), \(candles) candles) \(elapsed)ms after process start")
+    }
+}

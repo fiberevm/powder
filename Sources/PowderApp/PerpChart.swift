@@ -197,7 +197,7 @@ enum ChartMath {
 /// Canvas pass. Drag pans, scroll and pinch zoom, the axes rescale, ⇧-drag measures, ⌥-click marks a price.
 /// A price the chart marks for the selected wallet's position in this market.
 struct ChartLevel: Equatable {
-    enum Kind { case entryLong, entryShort, liquidation }
+    enum Kind { case entryLong, entryShort, liquidation, orderBuy, orderSell, alert, stopLoss, takeProfit }
     let kind: Kind
     let price: Double
     let label: String
@@ -305,6 +305,14 @@ struct PerpChart: View, Equatable {
                 } else {
                     model.togglePriceLine(at: layout.price(atY: location.y), tolerance: layout.priceSpan(points: 5))
                 }
+            }
+            // Right-click: a menu at the pointer for trading and alerts at that price.
+            .onRightClick { point in
+                guard layout.mainPane.contains(point) else { return }
+                model.chartMenu = PerpsModel.ChartMenuRequest(
+                    point: point, price: layout.price(atY: point.y), tolerance: layout.priceSpan(points: 6)
+                )
+                DropdownCenter.dismiss = { [weak model] in model?.chartMenu = nil }
             }
             .background(ChartScrollCatcher { point, dx, dy, magnification in
                 scroll(at: point, dx: dx, dy: dy, magnification: magnification, layout: layout)
@@ -949,15 +957,22 @@ private struct ChartRenderer {
     private func drawLevels(_ pane: inout GraphicsContext, axis: inout GraphicsContext) {
         for level in levels {
             let color: Color = switch level.kind {
-            case .entryLong: up
-            case .entryShort: down
+            case .entryLong, .orderBuy, .takeProfit: up
+            case .entryShort, .orderSell, .stopLoss: down
             case .liquidation: PowderPalette.cautionAmber
+            case .alert: Term.accent
+            }
+            // A position is dashed; an order waiting on the book is dotted, an alert a thin solid line.
+            let dash: [CGFloat] = switch level.kind {
+            case .orderBuy, .orderSell: [2, 3]
+            case .alert: []
+            default: [6, 3]
             }
             let rawY = layout.y(level.price).rounded() + 0.5
             let y = min(max(rawY, layout.mainPane.minY + 8), layout.mainPane.maxY - 8)
             var label = level.label
             if rawY == y {
-                pane.stroke(horizontal(y), with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: 1, dash: [6, 3]))
+                pane.stroke(horizontal(y), with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: 1, dash: dash))
             } else {
                 label += rawY < y ? " ↑" : " ↓"
             }

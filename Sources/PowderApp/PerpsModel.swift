@@ -38,6 +38,8 @@ final class PerpsModel: ObservableObject {
     let solana: SolanaToken?
     /// Liquidity, market cap and holders: the Solana header's figures.
     @Published private(set) var solanaStats: SolanaStats?
+    /// True while swaps are arriving over the socket rather than only by polling.
+    @Published private(set) var isSolanaStreaming = false
 
     /// What drawings, price lines and panel sizes are saved under.
     private var storageKey: String { solana.map { "sol:\($0.address)" } ?? coin }
@@ -85,6 +87,32 @@ final class PerpsModel: ObservableObject {
 
     /// Called after the tab switches to a different market.
     var onCoinChange: (() -> Void)?
+    /// Opens a link from the token's details in a web tab.
+    var onOpenLink: ((URL) -> Void)?
+    /// A short line shown over the chart for a few seconds: what a key or menu just did.
+    @Published private(set) var notice: String?
+    private var noticeTask: Task<Void, Never>?
+    /// Where the chart was right-clicked, and the price there: its menu is open while this is set.
+    @Published var chartMenu: ChartMenuRequest?
+    /// What a Solana token is beyond its price: safety figures and links.
+    @Published private(set) var solanaDetails: SolanaTokenDetails?
+
+    struct ChartMenuRequest: Equatable {
+        let point: CGPoint
+        let price: Double
+        /// How far, in price, counts as "on" a line at this zoom.
+        let tolerance: Double
+    }
+
+    func notify(_ text: String) {
+        notice = text
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
+    }
     /// Asks the workspace to open the ⌘P palette.
     var onFindMarket: (() -> Void)?
 
@@ -397,6 +425,7 @@ final class PerpsModel: ObservableObject {
                 let older = self.candles.filter { $0.t < (snapshot.first?.t ?? 0) }
                 let newer = self.candles.filter { $0.t > (snapshot.last?.t ?? .max) }
                 self.candles = older + snapshot + newer
+                Launch.chartIsReady(self.coin, candles: self.candles.count)
                 self.errorMessage = nil
             } catch {
                 guard !Task.isCancelled else { return }
@@ -428,14 +457,78 @@ final class PerpsModel: ObservableObject {
         }
     }
 
-    /// Solana has no socket here: the latest candles and swaps are fetched every two seconds,
-    /// and the token's figures every six.
+    /// Swaps arrive live over Codex's socket and move the price, the tape and the forming candle as they happen.
+    private func streamSolana(_ token: SolanaToken) async {
+        var failures = 0
+        // Every pool of the token is watched; if Codex refuses that, the main pool alone.
+        var wholeToken = true
+        while !Task.isCancelled {
+            guard let pair = solanaStats?.pairAddress, let key = KeychainStore().readAPIKey() else {
+                try? await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+            let decimals = solanaStats?.decimals
+            do {
+                for try await payload in CodexClient().eventStream(token: wholeToken ? token.address : nil, pair: pair, apiKey: key) {
+                    guard !Task.isCancelled else { return }
+                    let fresh = try SolanaAPI.liveTrades(in: payload, symbol: token.symbol, mint: token.address, decimals: decimals)
+                    guard !fresh.isEmpty else { continue }
+                    if !isSolanaStreaming {
+                        HyperliquidExchange.log("solana stream \(token.symbol): live (\(wholeToken ? "all pools" : "main pool"))")
+                    }
+                    failures = 0
+                    isSolanaStreaming = true
+                    apply(.trades(fresh))
+                    for trade in fresh.sorted(by: { $0.time < $1.time }) { extendCandle(with: trade) }
+                }
+            } catch {
+                if failures == 0 { HyperliquidExchange.log("solana stream \(token.symbol): \(error.localizedDescription)") }
+                if case CodexError.graphQL = error, wholeToken {
+                    wholeToken = false
+                    continue
+                }
+            }
+            isSolanaStreaming = false
+            failures += 1
+            try? await Task.sleep(for: .seconds(min(Double(failures) * 2, 20)))
+        }
+    }
+
+    /// Folds one live swap into the candle it belongs to, starting the next candle when its time has come.
+    private func extendCandle(with trade: HLTrade) {
+        guard let last = candles.last, trade.px > 0 else { return }
+        let length = interval.milliseconds
+        let bucket = trade.time / length * length
+        if bucket == last.t {
+            apply(.candle(HLCandle(
+                t: last.t, coin: last.coin, interval: last.interval, o: last.o,
+                h: max(last.h, trade.px), l: min(last.l, trade.px), c: trade.px, v: last.v + trade.px * trade.sz
+            )))
+        } else if bucket > last.t {
+            apply(.candle(HLCandle(
+                t: bucket, coin: last.coin, interval: last.interval, o: last.c,
+                h: max(last.c, trade.px), l: min(last.c, trade.px), c: trade.px, v: trade.px * trade.sz
+            )))
+        }
+    }
+
+    /// Alongside the live swaps, candles and the tape are re-read every few seconds so nothing drifts,
+    /// and the token's figures every nine.
     private func pollSolana(_ token: SolanaToken) async {
+        let live = Task { [weak self] in await self?.streamSolana(token) }
+        defer {
+            live.cancel()
+            isSolanaStreaming = false
+        }
         var round = 0
         while !Task.isCancelled {
             let interval = interval
             let started = ContinuousClock.now
             do {
+                // Safety figures and links change rarely: read at the start, then each minute.
+                if round % 20 == 0, let details = try? await SolanaAPI.details(address: token.address) {
+                    solanaDetails = details
+                }
                 if round % 3 == 0, let stats = try await SolanaAPI.stats(address: token.address) {
                     guard !Task.isCancelled else { return }
                     solanaStats = stats
@@ -447,7 +540,8 @@ final class PerpsModel: ObservableObject {
                 }
                 async let latest = SolanaAPI.bars(token: token, interval: interval, count: 3)
                 let pair = solanaStats?.pairAddress
-                async let swaps: [HLTrade] = pair == nil ? [] : SolanaAPI.trades(pair: pair ?? "", symbol: token.symbol)
+                let decimals = solanaStats?.decimals
+                async let swaps: [HLTrade] = pair == nil ? [] : SolanaAPI.trades(pair: pair ?? "", symbol: token.symbol, mint: token.address, decimals: decimals)
                 let (bars, fresh) = try await (latest, swaps)
                 guard !Task.isCancelled else { return }
                 if self.interval == interval, !candles.isEmpty {
@@ -463,7 +557,7 @@ final class PerpsModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             round += 1
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(3))
         }
     }
 
@@ -530,6 +624,16 @@ enum HLFormat {
     static func size(_ value: Double, decimals: Int) -> String {
         if value >= 100_000 { return compact(value) }
         return value.formatted(.number.precision(.fractionLength(min(decimals, 4))).grouping(.never).locale(posix))
+    }
+
+    /// A token amount of any scale: large ones shortened, small ones with enough places to mean something.
+    static func amount(_ value: Double) -> String {
+        switch abs(value) {
+        case 100_000...: compact(value)
+        case 1...: size(value, decimals: 2)
+        case 0.01...: size(value, decimals: 4)
+        default: size(value, decimals: 6)
+        }
     }
 
     static func compact(_ value: Double) -> String {

@@ -9,15 +9,59 @@ struct PaletteItem: Identifiable {
     /// 24h change, shown coloured after the price on market rows.
     var change: Double?
     var icon = ""
+    /// Where the market's logo may be found, tried in order. The icon shows until one loads.
+    var logos: [URL] = []
+    /// 24h volume in dollars, for ranking markets from different venues together.
+    var volume = 0.0
     var section: String?
     let run: @MainActor () -> Void
+}
+
+/// Coin and token logos for the palette, fetched once and kept for the session.
+@MainActor
+final class LogoStore: ObservableObject {
+    static let shared = LogoStore()
+
+    @Published private var images: [URL: NSImage] = [:]
+    private var requested: Set<URL> = []
+
+    /// The logo if it has loaded; otherwise starts loading it and returns nil.
+    func image(for candidates: [URL]) -> NSImage? {
+        guard let key = candidates.first else { return nil }
+        if let image = images[key] { return image }
+        guard requested.insert(key).inserted else { return nil }
+        Task {
+            for url in candidates {
+                guard let (data, response) = try? await URLSession.shared.data(from: url),
+                      (response as? HTTPURLResponse)?.statusCode == 200,
+                      // A missing logo can come back as a web page; only an image counts.
+                      response.mimeType?.hasPrefix("image/") == true,
+                      let image = NSImage(data: data), image.isValid else { continue }
+                images[key] = image
+                return
+            }
+        }
+        return nil
+    }
+
+    /// Hyperliquid's own icon for a perp. "kPEPE" and the like are drawn with the base coin's.
+    static func perp(_ coin: String) -> [URL] {
+        var names = [coin]
+        if coin.hasPrefix("k"), coin.count > 1 { names.append(String(coin.dropFirst())) }
+        return names.compactMap { URL(string: "https://app.hyperliquid.xyz/coins/\($0).svg") }
+    }
 }
 
 enum PaletteSearch {
     /// Title-prefix hits lead, then substring hits, then scattered-letter matches; order is kept within each.
     static func filter(_ items: [PaletteItem], by query: String) -> [PaletteItem] {
+        let matched = matches(items, by: query)
+        return matched.prefix + matched.exact + matched.fuzzy
+    }
+
+    static func matches(_ items: [PaletteItem], by query: String) -> (prefix: [PaletteItem], exact: [PaletteItem], fuzzy: [PaletteItem]) {
         let query = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return items }
+        guard !query.isEmpty else { return (items, [], []) }
         var prefix: [PaletteItem] = [], exact: [PaletteItem] = [], fuzzy: [PaletteItem] = []
         for item in items {
             let title = item.title.lowercased()
@@ -30,7 +74,7 @@ enum PaletteSearch {
                 fuzzy.append(item)
             }
         }
-        return prefix + exact + fuzzy
+        return (prefix, exact, fuzzy)
     }
 
     private static func isSubsequence(_ needle: String, of hay: String) -> Bool {
@@ -49,6 +93,7 @@ enum PaletteSearch {
 /// Studio's quick pick: an accent-outlined field over a flat list, floating at the top of the window.
 struct PaletteView: View {
     @ObservedObject var router: AppRouter
+    @ObservedObject private var logos = LogoStore.shared
     @FocusState private var isFocused: Bool
 
     private static let rowHeight: CGFloat = 26
@@ -106,7 +151,14 @@ struct PaletteView: View {
     private func row(_ item: PaletteItem, isSelected: Bool) -> some View {
         HStack(spacing: 8) {
             Group {
-                if item.icon.isEmpty {
+                if let logo = logos.image(for: item.logos) {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 16, height: 16)
+                        .clipShape(Circle())
+                } else if item.icon.isEmpty {
                     Color.clear
                 } else {
                     Image(systemName: item.icon)
@@ -114,7 +166,7 @@ struct PaletteView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 14)
+            .frame(width: 16)
 
             Text(item.title)
                 .font(.system(size: 13))

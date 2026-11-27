@@ -161,6 +161,57 @@ extension CodexClient {
         }
     }
 
+    /// Swaps as they happen, as the raw reply: across every pool of a token, or in one pool.
+    /// Ends with an error when the socket drops.
+    func eventStream(token: String? = nil, pair: String = "", apiKey: String) -> AsyncThrowingStream<Data, Error> {
+        let socketStream = graphQLStream(apiKey: apiKey, operations: [
+            token.map {
+                WebSocketOperation(
+                    id: "token-events", operationName: "PowderTokenEvents",
+                    query: Self.tokenEventSubscription, variables: ["address": $0]
+                )
+            } ?? WebSocketOperation(
+                id: "pair-events", operationName: "PowderPairEvents",
+                query: Self.pairEventSubscription, variables: ["address": pair]
+            ),
+        ])
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
+            let worker = Task {
+                do {
+                    for try await event in socketStream {
+                        if case let .next(_, payload) = event { continuation.yield(payload) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in worker.cancel() }
+        }
+    }
+
+    static let tokenEventSubscription = """
+    subscription PowderTokenEvents($address: String!) {
+      onTokenEventsCreated(input: { tokenAddress: $address, networkId: \(solanaNetworkID) }) {
+        events {
+          timestamp eventDisplayType token0Address token1Address quoteToken transactionHash
+          data { ... on SwapEventData { priceUsd priceUsdTotal amountNonLiquidityToken amount0 amount1 } }
+        }
+      }
+    }
+    """
+
+    static let pairEventSubscription = """
+    subscription PowderPairEvents($address: String!) {
+      onEventsCreated(address: $address, networkId: \(solanaNetworkID)) {
+        events {
+          timestamp eventDisplayType token0Address token1Address quoteToken transactionHash
+          data { ... on SwapEventData { priceUsd priceUsdTotal amountNonLiquidityToken amount0 amount1 } }
+        }
+      }
+    }
+    """
+
     func tokenDetailStream(
         for address: String,
         timeframe: ChartTimeframe,
