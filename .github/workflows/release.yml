@@ -1,19 +1,43 @@
 name: Release
 
 # Builds Powder for Apple silicon and for Intel, signs both with the Developer ID, and notarizes them
-# when the Apple credentials are set. Runs when a version tag is pushed, or by hand from the Actions tab.
+# when the Apple credentials are set.
+#
+# Security: this workflow handles a code-signing key, so
+#   - it runs only on a version tag or a manual start, never on pull requests;
+#   - the key lives in the "release" environment, which a maintainer must approve for each run;
+#   - tests run in a separate job that has no secrets;
+#   - every action is GitHub's own and pinned to an exact commit.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  test:
+    name: Test
+    if: github.repository == 'fiberevm/powder'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Use the newest released Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -n 1)"
+      - run: swift test
+
   build:
     name: ${{ matrix.label }}
+    needs: test
     runs-on: macos-15
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -22,70 +46,80 @@ jobs:
             label: apple-silicon
           - arch: x86_64
             label: intel
-    env:
-      POWDER_ARCH: ${{ matrix.arch }}
-      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
-      DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          xcode-version: latest-stable
+          persist-credentials: false
 
-      - name: Test
-        if: matrix.arch == 'arm64'
-        run: swift test
+      - name: Use the newest released Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -n 1)"
+
+      # The app is compiled before the key is on the machine: package resolution and the build cannot reach it.
+      - name: Build
+        env:
+          POWDER_ARCH: ${{ matrix.arch }}
+        run: ./Scripts/release.sh --package-only
 
       - name: Install the signing certificate
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
         run: |
           if [ -z "$DEVELOPER_ID_P12" ]; then
-            echo "::error::The DEVELOPER_ID_P12 secret is not set."
+            echo "::error::The DEVELOPER_ID_P12 secret is not set in the release environment."
             exit 1
           fi
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password="$(uuidgen)"
           echo "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
           security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/certificate.p12"
 
-      - name: Build, sign and notarize
+      - name: Sign and notarize
+        env:
+          POWDER_ARCH: ${{ matrix.arch }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          LABEL: ${{ matrix.label }}
         run: |
-          archive="$(./Scripts/release.sh | tail -n 1)"
+          archive="$(./Scripts/release.sh --prebuilt | tail -n 1)"
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+          shasum -a 256 "$archive"
           if [[ "$archive" == *unnotarized* ]]; then
-            echo "::warning::${{ matrix.label }}: signed but not notarized. Set APPLE_ID, APPLE_APP_PASSWORD and APPLE_TEAM_ID."
+            echo "::warning::$LABEL: signed but not notarized. Set APPLE_ID and APPLE_APP_PASSWORD in the release environment."
           fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Powder-${{ matrix.label }}
-          path: ${{ env.ARCHIVE }}
-          if-no-files-found: error
 
       - name: Remove the signing keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Powder-${{ matrix.label }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
 
   publish:
     name: Publish
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: builds
           merge-multiple: true
-      - name: Create the release
+      - name: Create the release, with checksums
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" builds/*.zip --repo "$GITHUB_REPOSITORY" --title "Powder $GITHUB_REF_NAME" --generate-notes
+        run: |
+          (cd builds && shasum -a 256 *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          gh release create "$GITHUB_REF_NAME" builds/*.zip builds/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "Powder $GITHUB_REF_NAME" --generate-notes

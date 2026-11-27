@@ -292,6 +292,8 @@ private struct TabStrip: View {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
+                // It reads as part of the title bar, so a double-click does what one does there.
+                .onTapGesture(count: 2) { WindowChrome.titleBarDoubleClick(router.keys.window) }
                 .onDrag {
                     NSItemProvider(object: (WorkspaceDrag.panePrefix + group.id.uuidString) as NSString)
                 }
@@ -401,5 +403,16 @@ private struct MarketTabLabel: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+enum WindowChrome {
+    /// What a title bar double-click does, as chosen in System Settings: fill the screen unless set to minimize or nothing.
+    @MainActor static func titleBarDoubleClick(_ window: NSWindow?) {
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window?.performMiniaturize(nil)
+        case "None": break
+        default: window?.performZoom(nil)
+        }
     }
 }

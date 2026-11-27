@@ -40,6 +40,13 @@ final class PerpsModel: ObservableObject {
     @Published private(set) var solanaStats: SolanaStats?
     /// True while swaps are arriving over the socket rather than only by polling.
     @Published private(set) var isSolanaStreaming = false
+    /// When the newest swap folded into the candles happened.
+    private var lastSwapTime: Int64 = 0
+    /// The last three swap prices as they came, for telling a stray print from a move.
+    private var swapPrices: [Double] = []
+    /// The steadied price of each swap in the last seconds: what Codex's own candle may not hold yet.
+    private var liveSwaps: [(time: Int64, px: Double)] = []
+    private static let liveSwapWindow: Int64 = 15_000
 
     /// What drawings, price lines and panel sizes are saved under.
     private var storageKey: String { solana.map { "sol:\($0.address)" } ?? coin }
@@ -134,7 +141,8 @@ final class PerpsModel: ObservableObject {
     var market: HLMarket? { solana == nil ? markets.first { $0.name == coin } : nil }
 
     var lastPrice: Double? {
-        trades.first?.px ?? ctx?.midPx ?? ctx?.markPx
+        // On Solana the chart's price, which ignores a stray print from a thin pool.
+        liveSwaps.last?.px ?? trades.first?.px ?? ctx?.midPx ?? ctx?.markPx
     }
 
     var dayChange: Double? {
@@ -478,8 +486,9 @@ final class PerpsModel: ObservableObject {
                     }
                     failures = 0
                     isSolanaStreaming = true
+                    let unseen = unseen(fresh)
                     apply(.trades(fresh))
-                    for trade in fresh.sorted(by: { $0.time < $1.time }) { extendCandle(with: trade) }
+                    fold(unseen, addingVolume: true)
                 }
             } catch {
                 if failures == 0 { HyperliquidExchange.log("solana stream \(token.symbol): \(error.localizedDescription)") }
@@ -494,22 +503,61 @@ final class PerpsModel: ObservableObject {
         }
     }
 
-    /// Folds one live swap into the candle it belongs to, starting the next candle when its time has come.
-    private func extendCandle(with trade: HLTrade) {
-        guard let last = candles.last, trade.px > 0 else { return }
+    /// The swaps in a batch the tape does not hold yet.
+    private func unseen(_ batch: [HLTrade]) -> [HLTrade] {
+        let known = Set(trades.prefix(Self.maxTrades).map(\.tid))
+        return batch.filter { $0.coin == coin && !known.contains($0.tid) }
+    }
+
+    /// Folds swaps into the candles, oldest first, so the chart's price is always the tape's newest.
+    /// Volume is added only for swaps Codex's own candle cannot have counted yet.
+    private func fold(_ swaps: [HLTrade], addingVolume: Bool) {
+        for trade in swaps.sorted(by: { $0.time < $1.time }) { extendCandle(with: trade, addingVolume: addingVolume) }
+    }
+
+    /// Folds one swap into the candle it belongs to, starting the next candle when its time has come.
+    private func extendCandle(with trade: HLTrade, addingVolume: Bool) {
+        // A swap read late is left to Codex's own candle: it must not move the close back behind a newer one.
+        guard let last = candles.last, trade.px > 0, trade.time >= lastSwapTime else { return }
+        lastSwapTime = trade.time
+        let px = steadied(trade.px)
+        liveSwaps.append((trade.time, px))
+        liveSwaps.removeAll { $0.time < trade.time - Self.liveSwapWindow }
         let length = interval.milliseconds
         let bucket = trade.time / length * length
+        let volume = addingVolume ? trade.px * trade.sz : 0
         if bucket == last.t {
             apply(.candle(HLCandle(
                 t: last.t, coin: last.coin, interval: last.interval, o: last.o,
-                h: max(last.h, trade.px), l: min(last.l, trade.px), c: trade.px, v: last.v + trade.px * trade.sz
+                h: max(last.h, px), l: min(last.l, px), c: px, v: last.v + volume
             )))
         } else if bucket > last.t {
             apply(.candle(HLCandle(
                 t: bucket, coin: last.coin, interval: last.interval, o: last.c,
-                h: max(last.c, trade.px), l: min(last.c, trade.px), c: trade.px, v: trade.px * trade.sz
+                h: max(last.c, px), l: min(last.c, px), c: px, v: volume
             )))
         }
+    }
+
+    /// Swaps come from every pool of the token, and a thin or oddly priced one can print far from the market.
+    /// A price close to the one before is taken as it is; a jump has to be repeated by the next swap before the chart follows it.
+    private func steadied(_ price: Double) -> Double {
+        let previous = swapPrices.last
+        swapPrices = Array((swapPrices + [price]).suffix(3))
+        guard let previous, swapPrices.count == 3, abs(price / previous - 1) > 0.01 else { return price }
+        return swapPrices.sorted()[1]
+    }
+
+    /// Codex's candles trail its swaps by a few seconds, so a re-read alone would drop the newest highs and lows
+    /// and pull the close back. The last seconds' swaps are laid over it until the candle has closed.
+    private func keepingLiveSwaps(_ bar: HLCandle) -> HLCandle {
+        let end = bar.t + interval.milliseconds
+        let inside = liveSwaps.filter { $0.time >= bar.t && $0.time < end }.map(\.px)
+        guard let newest = inside.last, Int64(Date().timeIntervalSince1970 * 1_000) < end + Self.liveSwapWindow else { return bar }
+        return HLCandle(
+            t: bar.t, coin: bar.coin, interval: bar.interval, o: bar.o,
+            h: max(bar.h, inside.max() ?? newest), l: min(bar.l, inside.min() ?? newest), c: newest, v: bar.v
+        )
     }
 
     /// Alongside the live swaps, candles and the tape are re-read every few seconds so nothing drifts,
@@ -544,10 +592,13 @@ final class PerpsModel: ObservableObject {
                 async let swaps: [HLTrade] = pair == nil ? [] : SolanaAPI.trades(pair: pair ?? "", symbol: token.symbol, mint: token.address, decimals: decimals)
                 let (bars, fresh) = try await (latest, swaps)
                 guard !Task.isCancelled else { return }
-                if self.interval == interval, !candles.isEmpty {
-                    for bar in bars { apply(.candle(bar)) }
-                }
+                // The tape first: the candles take their close from it.
+                let unseen = unseen(fresh)
                 if !fresh.isEmpty { apply(.trades(fresh)) }
+                if self.interval == interval, !candles.isEmpty {
+                    for bar in bars { apply(.candle(keepingLiveSwaps(bar))) }
+                    fold(unseen, addingVolume: false)
+                }
                 connection = .live
                 latencyMs = HyperliquidExchange.milliseconds(ContinuousClock.now - started)
                 errorMessage = nil
@@ -602,6 +653,9 @@ final class PerpsModel: ObservableObject {
                 if candles.count > Self.maxCandles {
                     candles.removeFirst(candles.count - Self.maxCandles)
                 }
+            } else if let index = candles.lastIndex(where: { $0.t <= candle.t }), candles[index].t == candle.t {
+                // A candle that has closed, re-read with its final figures.
+                candles[index] = candle
             }
         }
     }
