@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// How this run was started, and how long it took to show something.
@@ -8,6 +9,16 @@ enum Launch {
 
     static var defaults: UserDefaults {
         profile.flatMap { UserDefaults(suiteName: "io.powder.app.\($0)") } ?? .standard
+    }
+
+    /// A profile run can ask for a window size with `POWDER_WINDOW=1720x1080` (points), for repeatable screenshots.
+    @MainActor
+    static func sizeWindow() {
+        guard profile != nil, let text = ProcessInfo.processInfo.environment["POWDER_WINDOW"] else { return }
+        let parts = text.lowercased().split(separator: "x").compactMap { Double($0) }
+        guard parts.count == 2, let window = NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) else { return }
+        window.setContentSize(NSSize(width: parts[0], height: parts[1]))
+        window.center()
     }
 
     /// Milliseconds since the process was created, as the system records it (before any of the app's code ran).

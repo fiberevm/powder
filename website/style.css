@@ -85,6 +85,14 @@ figure { margin: 0; }
 main > figure { margin: 28px 0 0; border: 1px solid var(--rule); background: var(--panel); }
 main > figure img { display: block; width: 100%; height: auto; }
 
+.gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.gallery figure { border: 1px solid var(--rule); background: var(--panel); }
+.gallery a { display: block; }
+.gallery img { display: block; width: 100%; height: auto; }
+.gallery a:hover img { filter: brightness(1.08); }
+.gallery figcaption { padding: 11px 14px 12px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--dim); }
+.gallery figcaption b { display: block; color: #fff; font-size: 13px; }
+
 .block { margin-top: 76px; }
 .eyebrow { margin: 0 0 6px; color: var(--gold); font-size: 11.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
 h2 { margin: 0 0 8px; font-size: 24px; line-height: 1.2; letter-spacing: -0.02em; color: #fff; }
@@ -206,4 +214,5 @@ footer p { margin: 0; max-width: 62em; }
   .chart .value { width: auto; white-space: normal; }
   .spec div { grid-template-columns: 1fr; gap: 2px; }
   .downloads { grid-template-columns: 1fr; }
+  .gallery { grid-template-columns: 1fr; }
 }

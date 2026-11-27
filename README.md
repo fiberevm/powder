@@ -6,7 +6,7 @@
 
 <p align="center"><b>A native macOS trading terminal for Hyperliquid and Solana. Keyboard-first, monospaced, fast.</b></p>
 
-![Powder showing the live markets table beside a BTC candle chart](Assets/screenshot.png)
+![Powder with an indicator-laden ETH chart, order book and tape beside a BTC chart and the markets table](Assets/screenshot.png)
 
 Powder is a single SwiftUI app: no Electron, no web view around the chart, no account, no server of ours in the middle. Orders are signed on your Mac and sent straight to the exchange.
 

@@ -605,7 +605,7 @@ private struct ChartScrollCatcher: NSViewRepresentable {
         }
 
         private func handle(_ location: CGPoint, windowNumber: Int, dx: CGFloat, dy: CGFloat, magnification: CGFloat) -> Bool {
-            guard !ChartInput.isSuspended, let window, window.windowNumber == windowNumber else { return false }
+            guard !ChartInput.isSuspended, !ChartInput.isDropdownOpen, let window, window.windowNumber == windowNumber else { return false }
             let point = convert(location, from: nil)
             guard bounds.contains(point) else { return false }
             onScroll?(CGPoint(x: point.x, y: isFlipped ? point.y : bounds.height - point.y), dx, dy, magnification)
@@ -618,6 +618,8 @@ private struct ChartScrollCatcher: NSViewRepresentable {
 @MainActor
 enum ChartInput {
     static var isSuspended = false
+    /// Set while a dropdown or context menu is open, so a long list can be scrolled.
+    static var isDropdownOpen = false
 }
 
 // MARK: - Layout

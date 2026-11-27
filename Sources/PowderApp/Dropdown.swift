@@ -128,6 +128,9 @@ extension View {
                         // A new position is a new menu, so it animates in again.
                         .id("\(Int(place.origin.x)):\(Int(place.origin.y))")
                     }
+                    // While a list is open the scroll wheel is its own, not the chart's underneath.
+                    .onAppear { ChartInput.isDropdownOpen = true }
+                    .onDisappear { ChartInput.isDropdownOpen = false }
                 }
             }
         }

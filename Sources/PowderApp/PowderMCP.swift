@@ -41,8 +41,10 @@ final class PowderMCPServer {
 
     /// Lets the user's own agents connect too: `~/Library/Application Support/Powder/mcp.json`, readable only by them.
     private func publishURL() {
-        guard Launch.profile == nil, let url, let folder = Self.supportFolder else { return }
-        let file = folder.appendingPathComponent("mcp.json")
+        guard let url, let folder = Self.supportFolder else { return }
+        // A run with its own profile gets its own file, so it never replaces the address the real app published.
+        let file = folder.appendingPathComponent(Launch.profile.map { "mcp-\($0).json" } ?? "mcp.json")
+        Launch.sizeWindow()
         let body = #"{"mcpServers":{"powder":{"type":"http","url":"\#(url)"}}}"#
         try? Data(body.utf8).write(to: file, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
@@ -279,7 +281,7 @@ final class PowderTools {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         guard let data = bitmap.representation(using: .png, properties: [:]),
               let folder = PowderMCPServer.supportFolder else { throw ToolError("The picture could not be saved.") }
-        let file = folder.appendingPathComponent("screenshot.png")
+        let file = folder.appendingPathComponent(Launch.profile.map { "screenshot-\($0).png" } ?? "screenshot.png")
         try data.write(to: file, options: .atomic)
         return file.path
     }
