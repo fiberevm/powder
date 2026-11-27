@@ -112,6 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -123,3 +124,5 @@ jobs:
         run: |
           (cd builds && shasum -a 256 *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
           gh release create "$GITHUB_REF_NAME" builds/*.zip builds/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "Powder $GITHUB_REF_NAME" --generate-notes
+          # The website serves the latest release's builds: rebuild it so the download buttons point at this one.
+          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main

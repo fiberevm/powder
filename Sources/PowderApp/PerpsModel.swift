@@ -40,7 +40,10 @@ final class PerpsModel {
     private(set) var sideWidth = 300.0
 
     /// Set when the tab shows a Solana token instead of a Hyperliquid perp. `coin` is then its symbol.
-    let solana: SolanaToken?
+    /// A token named without a pool is settled on its main pool as the tab starts.
+    private(set) var solana: SolanaToken?
+    /// The token's other pools, most traded first: each can be opened as its own tab.
+    private(set) var solanaPools: [SolanaStats] = []
     /// Liquidity, market cap and holders: the Solana header's figures.
     private(set) var solanaStats: SolanaStats?
     /// True while swaps are arriving over the socket rather than only by polling.
@@ -128,6 +131,8 @@ final class PerpsModel {
     var onCoinChange: (() -> Void)?
     /// Opens a link from the token's details in a web tab.
     var onOpenLink: ((URL) -> Void)?
+    /// Opens another pool of the token in its own tab.
+    var onOpenMarket: ((SolanaToken) -> Void)?
     /// A short line shown over the chart for a few seconds: what a key or menu just did.
     private(set) var notice: String?
     private var noticeTask: Task<Void, Never>?
@@ -497,25 +502,20 @@ final class PerpsModel {
         }
     }
 
-    /// Swaps arrive live over Codex's socket and move the price, the tape and the forming candle as they happen.
-    private func streamSolana(_ token: SolanaToken) async {
+    /// The pool's swaps arrive live over Codex's socket and move the price, the tape and the forming candle as they happen.
+    private func streamSolana(_ token: SolanaToken, pool: String) async {
         var failures = 0
-        // Every pool of the token is watched; if Codex refuses that, the main pool alone.
-        var wholeToken = true
         while !Task.isCancelled {
-            guard let pair = solanaStats?.pairAddress, let key = KeychainStore().readAPIKey() else {
+            guard let key = KeychainStore().readAPIKey() else {
                 try? await Task.sleep(for: .milliseconds(500))
                 continue
             }
-            let decimals = solanaStats?.decimals
             do {
-                for try await payload in CodexClient().eventStream(token: wholeToken ? token.address : nil, pair: pair, apiKey: key) {
+                for try await payload in CodexClient().eventStream(pair: pool, apiKey: key) {
                     guard !Task.isCancelled else { return }
-                    let fresh = try SolanaAPI.liveTrades(in: payload, symbol: token.symbol, mint: token.address, decimals: decimals)
+                    let fresh = try SolanaAPI.liveTrades(in: payload, symbol: token.symbol, mint: token.address, decimals: solanaStats?.decimals)
                     guard !fresh.isEmpty else { continue }
-                    if !isSolanaStreaming {
-                        HyperliquidExchange.log("solana stream \(token.symbol): live (\(wholeToken ? "all pools" : "main pool"))")
-                    }
+                    if !isSolanaStreaming { HyperliquidExchange.log("solana stream \(token.pairName): live") }
                     failures = 0
                     isSolanaStreaming = true
                     let unseen = unseen(fresh)
@@ -523,11 +523,7 @@ final class PerpsModel {
                     fold(unseen, addingVolume: true)
                 }
             } catch {
-                if failures == 0 { HyperliquidExchange.log("solana stream \(token.symbol): \(error.localizedDescription)") }
-                if case CodexError.graphQL = error, wholeToken {
-                    wholeToken = false
-                    continue
-                }
+                if failures == 0 { HyperliquidExchange.log("solana stream \(token.pairName): \(error.localizedDescription)") }
             }
             isSolanaStreaming = false
             failures += 1
@@ -594,8 +590,30 @@ final class PerpsModel {
 
     /// Alongside the live swaps, candles and the tape are re-read every few seconds so nothing drifts,
     /// and the token's figures every nine.
-    private func pollSolana(_ token: SolanaToken) async {
-        let live = Task { [weak self] in await self?.streamSolana(token) }
+    private func pollSolana(_ named: SolanaToken) async {
+        // A token named without a pool (a holding, a watchlist row, an older saved tab) goes to its main pool.
+        var token = named
+        while token.pool == nil {
+            do {
+                guard let found = try await SolanaAPI.mainPool(mint: token.address)?.token.pool else {
+                    throw CodexError.graphQL("No pool trades \(token.symbol).")
+                }
+                guard !Task.isCancelled else { return }
+                token.pool = found
+                solana = token
+                // The saved layout names the pool from here on, and the chart shows its candles.
+                onCoinChange?()
+                reloadCandles()
+            } catch {
+                guard !Task.isCancelled else { return }
+                connection = .reconnecting(attempt: 1)
+                errorMessage = error.localizedDescription
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { return }
+            }
+        }
+        guard let pool = token.pool else { return }
+        let live = Task { [weak self] in await self?.streamSolana(token, pool: pool.address) }
         defer {
             live.cancel()
             isSolanaStreaming = false
@@ -605,23 +623,42 @@ final class PerpsModel {
             let interval = interval
             let started = ContinuousClock.now
             do {
-                // Safety figures and links change rarely: read at the start, then each minute.
-                if round % 20 == 0, let details = try? await SolanaAPI.details(address: token.address) {
-                    solanaDetails = details
+                // Safety figures, links and the token's other pools change rarely: read at the start, then each minute.
+                if round % 20 == 0 {
+                    if let details = try? await SolanaAPI.details(address: token.address) { solanaDetails = details }
+                    if let pools = try? await SolanaAPI.pools(mint: token.address) {
+                        solanaPools = pools.filter { $0.pairAddress != pool.address }
+                    }
                 }
-                if round % 3 == 0, let stats = try await SolanaAPI.stats(address: token.address) {
+                if round % 3 == 0 {
+                    // Liquidity, volume and price are this pool's; market cap and holders are the token's.
+                    async let ofToken = SolanaAPI.stats(address: token.address)
+                    async let ofPool = SolanaAPI.pool(address: pool.address, base: token.address)
+                    let (whole, own) = try await (ofToken, ofPool)
                     guard !Task.isCancelled else { return }
-                    solanaStats = stats
-                    ctx = HLAssetCtx(
-                        markPx: stats.price, midPx: stats.price, oraclePx: stats.price,
-                        prevDayPx: stats.change24 > -1 ? stats.price / (1 + stats.change24) : 0,
-                        dayNtlVlm: stats.volume24, openInterest: 0, funding: 0
-                    )
+                    if var stats = whole ?? own {
+                        stats.token = token
+                        stats.pairAddress = pool.address
+                        if let own {
+                            stats.liquidity = own.liquidity
+                            stats.volume24 = own.volume24
+                            if own.price > 0 {
+                                stats.price = own.price
+                                stats.change24 = own.change24
+                            }
+                            stats.exchanges = own.exchanges
+                        }
+                        solanaStats = stats
+                        ctx = HLAssetCtx(
+                            markPx: stats.price, midPx: stats.price, oraclePx: stats.price,
+                            prevDayPx: stats.change24 > -1 ? stats.price / (1 + stats.change24) : 0,
+                            dayNtlVlm: stats.volume24, openInterest: 0, funding: 0
+                        )
+                    }
                 }
                 async let latest = SolanaAPI.bars(token: token, interval: interval, count: 3)
-                let pair = solanaStats?.pairAddress
                 let decimals = solanaStats?.decimals
-                async let swaps: [HLTrade] = pair == nil ? [] : SolanaAPI.trades(pair: pair ?? "", symbol: token.symbol, mint: token.address, decimals: decimals)
+                async let swaps: [HLTrade] = SolanaAPI.trades(pair: pool.address, symbol: token.symbol, mint: token.address, decimals: decimals)
                 let (bars, fresh) = try await (latest, swaps)
                 guard !Task.isCancelled else { return }
                 // The tape first: the candles take their close from it.

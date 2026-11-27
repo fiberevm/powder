@@ -2,7 +2,8 @@ import AppKit
 import Foundation
 import UserNotifications
 
-/// A stop loss or take profit on a Solana holding: when the price gets there, the whole holding is sold for SOL.
+/// A stop loss or take profit on a Solana holding: when the price in the pool it was set on gets there,
+/// the whole holding is sold for SOL by the best route (not only through that pool, so the sale is not held up by it).
 struct SolanaTrigger: Codable, Equatable, Identifiable, Sendable {
     enum Kind: String, Codable, Sendable {
         case stopLoss, takeProfit
@@ -86,7 +87,7 @@ final class SolanaTriggerStore: ObservableObject {
 
     private func updateWatching() {
         let waiting = triggers.filter(\.isActive)
-        quotes.want(Set(waiting.compactMap(\.token.mint)), for: "triggers")
+        quotes.want(Set(waiting.compactMap(\.token.quoteKey)), for: "triggers")
         if waiting.isEmpty {
             task?.cancel()
             task = nil
@@ -114,7 +115,8 @@ final class SolanaTriggerStore: ObservableObject {
                 remove(trigger.id)
                 continue
             }
-            guard let price = quotes.stats[mint]?.price, price > 0, trigger.isMet(by: price) else { continue }
+            // Judged on the price in the pool it was set on, which is the one drawn on that chart.
+            guard let price = trigger.token.quoteKey.flatMap({ quotes.stats[$0]?.price }), price > 0, trigger.isMet(by: price) else { continue }
             selling.insert(trigger.id)
             Task { await sell(trigger, amount: holding.raw, at: price) }
         }

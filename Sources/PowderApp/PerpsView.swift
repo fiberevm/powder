@@ -358,7 +358,7 @@ private struct MarketHeader: View {
                 model.onFindMarket?()
             } label: {
                 HStack(spacing: 8) {
-                    Text(model.solana == nil ? "\(model.coin)/USDC" : "\(model.coin)/USD")
+                    Text(model.solana.map { $0.pool == nil ? "\($0.symbol)/USD" : $0.pairName } ?? "\(model.coin)/USDC")
                         .font(Term.font(16, .bold))
                     if let leverage = model.market?.maxLeverage {
                         Text("\(leverage)x")
@@ -425,7 +425,7 @@ private struct MarketHeader: View {
                 Stat("MKT CAP", stats.map { "$" + HLFormat.compact($0.marketCap) } ?? "—"),
                 Stat("LIQUIDITY", stats.map { "$" + HLFormat.compact($0.liquidity) } ?? "—"),
                 Stat("24H VOL", "$" + HLFormat.compact(ctx.dayNtlVlm)),
-                Stat("EXCHANGE", stats?.exchangeLabel ?? "—"),
+                Stat("EXCHANGE", model.solana?.pool?.exchange ?? "—"),
                 Stat("HOLDERS", stats?.holders.map { HLFormat.compact(Double($0)).replacingOccurrences(of: ".00", with: "") } ?? "—"),
             ]
         }
@@ -1095,9 +1095,14 @@ private struct SolanaInfoPanel: View {
                 row("LIQUIDITY", "$" + HLFormat.compact(stats.liquidity))
                 row("24H VOL", "$" + HLFormat.compact(stats.volume24))
                 if let holders = stats.holders { row("HOLDERS", "\(holders)") }
-                ForEach(Array(stats.exchanges.enumerated()), id: \.element.name) { index, exchange in
-                    exchangeRow(index == 0 ? "EXCHANGE" : index == 1 ? "ALSO ON" : "", exchange, mint: stats.token.address)
+                if let exchange = stats.exchanges.first {
+                    exchangeRow("EXCHANGE", exchange, mint: stats.token.address)
                 }
+                if let pool = stats.token.pool {
+                    row("POOL", "\(pool.address.prefix(6))…\(pool.address.suffix(6))")
+                        .help("\(stats.token.pairName) on \(pool.exchange): \(pool.address). The chart, the trades and your swaps are this pool's alone.")
+                }
+                otherPools
             } else if !SolanaAPI.hasKey {
                 Text("Add a Codex API key in Settings ( ⌘, ) to load Solana data.")
                     .foregroundStyle(PowderPalette.riskCoral)
@@ -1199,7 +1204,33 @@ private struct SolanaInfoPanel: View {
         }
     }
 
-    /// One exchange the token trades on. A click opens the token there, in a Powder web tab.
+    /// The token's other pools, most traded first. A click opens that pool as its own market tab.
+    @ViewBuilder
+    private var otherPools: some View {
+        let pools = Array(model.solanaPools.prefix(6))
+        if !pools.isEmpty {
+            TermRule().padding(.vertical, 2)
+            Text("OTHER POOLS").font(Term.font(11, .bold))
+            ForEach(pools, id: \.pairAddress) { found in
+                Button {
+                    model.onOpenMarket?(found.token)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(found.token.pool?.exchange ?? "?").foregroundStyle(Term.accent)
+                        Text("/" + (found.token.pool?.quoteSymbol ?? "?")).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        Text("$" + HLFormat.compact(found.liquidity)).foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Open \(found.token.pairName) on \(found.token.pool?.exchange ?? "this exchange"): $\(HLFormat.compact(found.liquidity)) liquidity, $\(HLFormat.compact(found.volume24)) traded in 24h")
+            }
+        }
+    }
+
+    /// The exchange this pool is on. A click opens the token there, in a Powder web tab.
     @ViewBuilder
     private func exchangeRow(_ label: String, _ exchange: SolanaExchange, mint: String) -> some View {
         if let url = exchange.marketURL(mint: mint) {

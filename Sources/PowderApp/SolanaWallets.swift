@@ -231,7 +231,7 @@ final class SolanaWalletProvider: ObservableObject {
     /// Swaps `amount` (in the input token's smallest unit) at market: routed by Jupiter, signed here, landed by Nozomi.
     /// The result shows in the wallet as soon as the swap is priced; if it then fails, the wallet is put back.
     func swap(
-        walletID: UUID, input: String, output: String, amount: UInt64, outputDecimals: Int? = nil,
+        walletID: UUID, input: String, output: String, amount: UInt64, outputDecimals: Int? = nil, pool: SolanaPool? = nil,
         onStage: @MainActor (SolanaSwapStage) -> Void = { _ in }
     ) async throws -> SolanaFill {
         guard let wallet = wallet(walletID) else { throw WalletError.missingKey }
@@ -239,7 +239,9 @@ final class SolanaWalletProvider: ObservableObject {
         let before = balances[walletID]
         let costsBefore = costs
         do {
-            return try await perform(wallet: wallet, input: input, output: output, amount: amount, outputDecimals: outputDecimals, before: before, onStage: onStage)
+            return try await perform(
+                wallet: wallet, input: input, output: output, amount: amount, outputDecimals: outputDecimals, pool: pool, before: before, onStage: onStage
+            )
         } catch {
             // Shown ahead of the chain, and it did not happen.
             expected[walletID] = nil
@@ -294,7 +296,7 @@ final class SolanaWalletProvider: ObservableObject {
     }
 
     private func perform(
-        wallet: SolanaWallet, input: String, output: String, amount: UInt64, outputDecimals: Int?,
+        wallet: SolanaWallet, input: String, output: String, amount: UInt64, outputDecimals: Int?, pool: SolanaPool?,
         before: SolanaBalances?, onStage: @MainActor (SolanaSwapStage) -> Void
     ) async throws -> SolanaFill {
         let walletID = wallet.id
@@ -308,7 +310,7 @@ final class SolanaWalletProvider: ObservableObject {
         var transaction: SolanaTransaction?
         var quote: SolanaQuote?
         for maxAccounts in [56, 36] {
-            let candidate = try await Jupiter.quote(input: input, output: output, amount: amount, slippageBps: settings.slippageBps, maxAccounts: maxAccounts)
+            let candidate = try await Jupiter.quote(input: input, output: output, amount: amount, slippageBps: settings.slippageBps, maxAccounts: maxAccounts, pool: pool)
             if quote == nil, transaction == nil, maxAccounts == 56 {
                 // Priced: from here the trade shows as done while it is built, sent and landed.
                 if let before {

@@ -152,3 +152,13 @@ function renderFees() {
 
 slider.addEventListener("input", renderFees);
 renderFees();
+
+// ---- The version on the download buttons comes from the release the site was built with.
+
+fetch("downloads/version.txt")
+  .then((reply) => (reply.ok ? reply.text() : ""))
+  .then((text) => {
+    const version = text.trim().replace(/^v/, "");
+    if (version) document.getElementById("version").textContent = version;
+  })
+  .catch(() => {});

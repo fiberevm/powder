@@ -392,7 +392,7 @@ private struct MarketTabLabel: View {
             : model.dayChange
 
         HStack(spacing: 7) {
-            Text(model.coin)
+            Text(model.solana?.pairName ?? model.coin)
             if let mid {
                 TickingPrice(
                     value: mid,

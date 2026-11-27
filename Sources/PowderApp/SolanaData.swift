@@ -1,21 +1,56 @@
 import Foundation
 
-/// A Solana token a market tab can show.
+/// One pool: a pair of tokens on one exchange. A Solana tab shows a token as it trades in one pool.
+struct SolanaPool: Equatable, Sendable {
+    let address: String
+    /// Which of the pool's two tokens the tab's token is, as Codex names them: "token0" or "token1".
+    var side: String
+    /// The pool's other token: what the tab's token is bought with and sold for.
+    var quoteMint: String
+    var quoteSymbol: String
+    var quoteDecimals: Int
+    /// "Orca", "Raydium CLMM", "PumpSwap".
+    var exchange: String
+    /// The exchange's program, which is how the swap router knows it.
+    var program: String
+}
+
+/// A Solana token a market tab can show, in the pool the tab is on.
 struct SolanaToken: Equatable, Sendable {
     let address: String
     var symbol: String
     var name: String
+    /// Nil for a token named without a pool (a holding, a watchlist row): its tab settles on the token's main pool.
+    var pool: SolanaPool?
+
+    /// "BONK/SOL" once the pool is known.
+    var pairName: String { pool.map { "\(symbol)/\($0.quoteSymbol)" } ?? symbol }
 
     /// How the tab is written in the saved layout.
-    var savedName: String { "sol:\(address)|\(symbol)|\(name)" }
+    var savedName: String {
+        guard let pool else { return "sol:\(address)|\(symbol)|\(name)" }
+        func plain(_ text: String) -> String { text.replacingOccurrences(of: "|", with: "/") }
+        return "pool:\(pool.address)|\(address)|\(pool.side)|\(pool.quoteMint)|\(plain(pool.quoteSymbol))|\(pool.quoteDecimals)"
+            + "|\(pool.program)|\(plain(pool.exchange))|\(plain(symbol))|\(name)"
+    }
 
-    init(address: String, symbol: String, name: String) {
+    init(address: String, symbol: String, name: String, pool: SolanaPool? = nil) {
         self.address = address
         self.symbol = symbol
         self.name = name
+        self.pool = pool
     }
 
     init?(savedName: String) {
+        if savedName.hasPrefix("pool:") {
+            let parts = savedName.dropFirst(5).split(separator: "|", maxSplits: 9, omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 10, !parts[0].isEmpty, !parts[1].isEmpty, let decimals = Int(parts[5]) else { return nil }
+            self.init(address: parts[1], symbol: parts[8], name: parts[9], pool: SolanaPool(
+                address: parts[0], side: parts[2] == "token1" ? "token1" : "token0", quoteMint: parts[3], quoteSymbol: parts[4],
+                quoteDecimals: decimals, exchange: parts[7], program: parts[6]
+            ))
+            return
+        }
         guard savedName.hasPrefix("sol:") else { return nil }
         let parts = savedName.dropFirst(4).split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
         guard let address = parts.first, !address.isEmpty else { return nil }
@@ -44,16 +79,16 @@ struct SolanaExchange: Equatable, Sendable {
 
 /// A token's live figures from Codex.
 struct SolanaStats: Equatable, Sendable {
-    let token: SolanaToken
-    let price: Double
+    var token: SolanaToken
+    var price: Double
     /// 24h change as a fraction.
-    let change24: Double
-    let volume24: Double
-    let liquidity: Double
-    let marketCap: Double
-    let holders: Int?
-    /// The token's most liquid pool; its swaps are the trades tape.
-    let pairAddress: String?
+    var change24: Double
+    var volume24: Double
+    var liquidity: Double
+    var marketCap: Double
+    var holders: Int?
+    /// The pool these figures are read from: the tab's own, or the token's most liquid one.
+    var pairAddress: String?
     /// The exchange that pool is on ("Raydium", "Orca", "Pump"), then the others the token trades on.
     var exchanges: [SolanaExchange] = []
     var imageURL: URL?
@@ -282,23 +317,130 @@ enum SolanaAPI {
         }
     }
 
-    /// Candles ending at `end` (milliseconds), oldest first.
+    // MARK: Pools
+
+    private static let pairFields = """
+    price priceChange24 liquidity marketCap volumeUSD24 quoteToken
+    pair { address }
+    exchange { name address tradeUrl }
+    token0 { address name symbol decimals info { imageThumbUrl imageSmallUrl } }
+    token1 { address name symbol decimals info { imageThumbUrl imageSmallUrl } }
+    """
+
+    /// Pools matching a token's name, symbol or address, most traded first.
+    static func searchPools(_ phrase: String, limit: Int = 10) async throws -> [SolanaStats] {
+        let query = """
+        query($phrase: String, $limit: Int) {
+          filterPairs(phrase: $phrase, filters: { network: [\(network)] }, rankings: { attribute: volumeUSD24, direction: DESC }, limit: $limit) {
+            results { \(pairFields) }
+          }
+        }
+        """
+        return pools(in: try await post(query, variables: ["phrase": phrase, "limit": limit]))
+    }
+
+    /// The most traded pools with real liquidity in them, for the palette before anything is typed.
+    static func topPools(limit: Int = 40) async throws -> [SolanaStats] {
+        let query = """
+        query($limit: Int) {
+          filterPairs(filters: { network: [\(network)], liquidity: { gt: 100000 } }, rankings: { attribute: volumeUSD24, direction: DESC }, limit: $limit) {
+            results { \(pairFields) }
+          }
+        }
+        """
+        return pools(in: try await post(query, variables: ["limit": limit]))
+    }
+
+    /// One pool's figures, read from the side of `mint` (or the token Codex prices in it).
+    static func pool(address: String, base mint: String? = nil) async throws -> SolanaStats? {
+        let query = """
+        query($pairs: [String]) {
+          filterPairs(pairs: $pairs, limit: 1) { results { \(pairFields) } }
+        }
+        """
+        return pools(in: try await post(query, variables: ["pairs": ["\(address):\(network)"]]), base: mint).first
+    }
+
+    /// The pools a token trades in, most traded first.
+    static func pools(mint: String, limit: Int = 12) async throws -> [SolanaStats] {
+        let query = """
+        query($tokens: [String], $limit: Int) {
+          filterPairs(filters: { network: [\(network)], tokenAddress: $tokens }, rankings: { attribute: volumeUSD24, direction: DESC }, limit: $limit) {
+            results { \(pairFields) }
+          }
+        }
+        """
+        return pools(in: try await post(query, variables: ["tokens": [mint], "limit": limit]), base: mint)
+    }
+
+    /// The pool a token named without one is shown in: its most liquid.
+    static func mainPool(mint: String) async throws -> SolanaStats? {
+        guard let pair = try await stats(address: mint)?.pairAddress else { return nil }
+        return try await pool(address: pair, base: mint)
+    }
+
+    private static func pools(in data: [String: Any], base mint: String? = nil) -> [SolanaStats] {
+        let rows = (data["filterPairs"] as? [String: Any])?["results"] as? [[String: Any]] ?? []
+        return rows.compactMap { poolStats($0, base: mint) }
+    }
+
+    /// A pool has two tokens and Codex prices one of them (which it calls the pool's "quote token").
+    /// Read from that token's side unless `mint` names the other; price and market cap are only known for the priced one.
+    private static func poolStats(_ row: [String: Any], base mint: String?) -> SolanaStats? {
+        guard let address = (row["pair"] as? [String: Any])?["address"] as? String,
+              let token0 = row["token0"] as? [String: Any], let token1 = row["token1"] as? [String: Any],
+              let mint0 = token0["address"] as? String, let mint1 = token1["address"] as? String else { return nil }
+        let priced = row["quoteToken"] as? String == "token1" ? "token1" : "token0"
+        let side: String
+        if let mint {
+            guard mint == mint0 || mint == mint1 else { return nil }
+            side = mint == mint1 ? "token1" : "token0"
+        } else {
+            side = priced
+        }
+        let (own, other) = side == "token0" ? (token0, token1) : (token1, token0)
+        let exchange = row["exchange"] as? [String: Any]
+        let exchangeName = exchange?["name"] as? String ?? "?"
+        let pool = SolanaPool(
+            address: address, side: side, quoteMint: side == "token0" ? mint1 : mint0,
+            quoteSymbol: other["symbol"] as? String ?? "?", quoteDecimals: (other["decimals"] as? NSNumber)?.intValue ?? 9,
+            exchange: exchangeName, program: exchange?["address"] as? String ?? ""
+        )
+        let info = own["info"] as? [String: Any]
+        let isPriced = side == priced
+        // Only real web links: the page is shown inside the app.
+        let url = (exchange?["tradeUrl"] as? String).flatMap(URL.init).flatMap { $0.scheme == "https" ? $0 : nil }
+        return SolanaStats(
+            token: SolanaToken(
+                address: side == "token0" ? mint0 : mint1, symbol: own["symbol"] as? String ?? "?", name: own["name"] as? String ?? "", pool: pool
+            ),
+            price: isPriced ? number(row["price"]) : 0, change24: isPriced ? number(row["priceChange24"]) : 0,
+            volume24: number(row["volumeUSD24"]), liquidity: number(row["liquidity"]), marketCap: isPriced ? number(row["marketCap"]) : 0,
+            holders: nil, pairAddress: address, exchanges: [SolanaExchange(name: exchangeName, tradeURL: url)],
+            imageURL: (info?["imageThumbUrl"] as? String ?? info?["imageSmallUrl"] as? String).flatMap(URL.init),
+            decimals: (own["decimals"] as? NSNumber)?.intValue
+        )
+    }
+
+    /// Candles ending at `end` (milliseconds), oldest first. The pool's own when the token is in one, else the token's across all pools.
     static func bars(token: SolanaToken, interval: HLInterval, end: Int64? = nil, count: Int = 600) async throws -> [HLCandle] {
         guard let code = resolutions.first(where: { $0.interval == interval })?.code else { return [] }
         let to = Int((end ?? Int64(Date().timeIntervalSince1970 * 1_000)) / 1_000)
         let from = max(to - Int(interval.milliseconds / 1_000) * count, 0)
+        // `quoteToken` is Codex's name for the token being priced: this one, whichever side of the pool it is.
+        let field = token.pool == nil ? "getTokenBars" : "getBars"
         let query = """
         query($symbol: String!, $from: Int!, $to: Int!, $resolution: String!, $countback: Int!) {
-          getTokenBars(symbol: $symbol, from: $from, to: $to, resolution: $resolution, countback: $countback,
-                       removeLeadingNullValues: true, removeEmptyBars: true, statsType: FILTERED) {
+          \(field)(symbol: $symbol, from: $from, to: $to, resolution: $resolution, countback: $countback,
+                       \(token.pool.map { "quoteToken: \($0.side), " } ?? "")removeLeadingNullValues: true, removeEmptyBars: true, statsType: FILTERED) {
             o h l c t volume
           }
         }
         """
         let data = try await post(query, variables: [
-            "symbol": "\(token.address):\(network)", "from": from, "to": to, "resolution": code, "countback": min(count, 1_500),
+            "symbol": "\(token.pool?.address ?? token.address):\(network)", "from": from, "to": to, "resolution": code, "countback": min(count, 1_500),
         ])
-        guard let bars = data["getTokenBars"] as? [String: Any], let times = bars["t"] as? [Any] else { return [] }
+        guard let bars = data[field] as? [String: Any], let times = bars["t"] as? [Any] else { return [] }
         func column(_ key: String) -> [Any] { bars[key] as? [Any] ?? [] }
         let o = column("o"), h = column("h"), l = column("l"), c = column("c"), v = column("volume")
         var candles: [HLCandle] = []
