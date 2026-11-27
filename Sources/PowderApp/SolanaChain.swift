@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 // MARK: - Base58
 
@@ -453,11 +454,43 @@ struct SolanaQuote: @unchecked Sendable {
 enum Jupiter {
     private static let hosts = ["https://api.jup.ag/swap/v1", "https://lite-api.jup.ag/swap/v1"]
 
-    static func quote(input: String, output: String, amount: UInt64, slippageBps: Int, maxAccounts: Int = 56) async throws -> SolanaQuote {
-        let query = "inputMint=\(input)&outputMint=\(output)&amount=\(amount)&slippageBps=\(slippageBps)&maxAccounts=\(maxAccounts)&restrictIntermediateTokens=true"
+    /// Jupiter's name for each exchange program ("Whirlpool", "Raydium CLMM"), read once.
+    private static let labels = OSAllocatedUnfairLock(initialState: [String: String]())
+
+    private static func label(program: String) async throws -> String? {
+        if let known = labels.withLock({ $0[program] }) { return known }
+        let root = try await request { host in URLRequest(url: URL(string: "\(host)/program-id-to-label")!, timeoutInterval: 10) }
+        let fresh = root.compactMapValues { $0 as? String }
+        if !fresh.isEmpty { labels.withLock { $0 = fresh } }
+        return fresh[program]
+    }
+
+    /// With `pool`, the swap is one hop through that pool and nothing else: the router is held to the pool's
+    /// exchange and to direct routes, and a quote that would go through any other pool is refused.
+    static func quote(
+        input: String, output: String, amount: UInt64, slippageBps: Int, maxAccounts: Int = 56, pool: SolanaPool? = nil
+    ) async throws -> SolanaQuote {
+        var query = "inputMint=\(input)&outputMint=\(output)&amount=\(amount)&slippageBps=\(slippageBps)&maxAccounts=\(maxAccounts)"
+        if let pool {
+            guard let label = try await label(program: pool.program),
+                  let encoded = label.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+                throw SolanaError.noRoute("the router does not trade on \(pool.exchange), so this pool cannot be traded from here.")
+            }
+            query += "&onlyDirectRoutes=true&dexes=\(encoded)"
+        } else {
+            query += "&restrictIntermediateTokens=true"
+        }
         let root = try await request { host in URLRequest(url: URL(string: "\(host)/quote?\(query)")!, timeoutInterval: 10) }
         guard let out = (root["outAmount"] as? String).flatMap(UInt64.init), out > 0 else {
-            throw SolanaError.noRoute(root["error"] as? String ?? root["message"] as? String ?? "nothing trades this pair right now.")
+            let reason = root["error"] as? String ?? root["message"] as? String ?? "nothing trades this pair right now."
+            throw SolanaError.noRoute(pool.map { "\(reason) (The swap is held to this \($0.exchange) pool.)" } ?? reason)
+        }
+        if let pool {
+            let hops = (root["routePlan"] as? [[String: Any]] ?? []).compactMap { ($0["swapInfo"] as? [String: Any])?["ammKey"] as? String }
+            guard hops == [pool.address] else {
+                let other = hops.first.map { " (\($0.prefix(6))…)" } ?? ""
+                throw SolanaError.noRoute("the router would use another \(pool.exchange) pool\(other), not this one. Nothing was sent.")
+            }
         }
         return SolanaQuote(
             raw: root,

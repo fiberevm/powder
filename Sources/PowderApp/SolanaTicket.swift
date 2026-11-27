@@ -16,8 +16,9 @@ struct SolanaQuoteCurrency: Equatable, Identifiable {
     ]
 }
 
-/// Buy / sell for a Solana token tab: wallet, what to pay with, a size to buy, a share of the holding to sell.
-/// Swaps are routed by Jupiter, signed here, and landed through Nozomi.
+/// Buy / sell for a Solana pool tab: wallet, a size to buy, a share of the holding to sell.
+/// The token is bought with and sold for the pool's other token, in one swap through that pool and no other.
+/// Swaps are built by Jupiter, signed here, and landed through Nozomi.
 struct SolanaTicket: View {
     let model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
@@ -37,9 +38,12 @@ struct SolanaTicket: View {
 
     private var solana: SolanaWalletProvider { wallets.solana }
 
-    /// The currencies this token can be traded against: every one but itself.
+    /// What this token is traded against: its pool's other token. Before the pool is known, any currency but itself.
     private var quotes: [SolanaQuoteCurrency] {
-        SolanaQuoteCurrency.all.filter { $0.mint != model.solana?.address }
+        if let pool = model.solana?.pool {
+            return [SolanaQuoteCurrency(symbol: pool.quoteSymbol, mint: pool.quoteMint, decimals: pool.quoteDecimals)]
+        }
+        return SolanaQuoteCurrency.all.filter { $0.mint != model.solana?.address }
     }
 
     private var quote: SolanaQuoteCurrency {
@@ -184,7 +188,8 @@ struct SolanaTicket: View {
                         Text(isOpen ? "▴" : "▾").font(Term.font(8)).foregroundStyle(Term.accent)
                     }
                 }
-                .help("What to pay with when buying and receive when selling")
+                .help(model.solana?.pool.map { "This \($0.exchange) pool trades \(model.coin) against \($0.quoteSymbol): buys pay it and sells receive it" }
+                    ?? "What to pay with when buying and receive when selling")
             }
             .padding(.horizontal, 8)
             .frame(height: 24)
@@ -330,7 +335,7 @@ struct SolanaTicket: View {
     /// The wallet's default buy is in SOL; another currency starts at the same value.
     private func fillDefault() {
         let sol = solana.selected?.settings.defaultBuySOL ?? SolanaTradeSettings().defaultBuySOL
-        guard quote != .sol, let solPrice = solana.solPrice, let paid = quotePrice, paid > 0 else {
+        guard quote.mint != SolanaRPC.wrappedSOL, let solPrice = solana.solPrice, let paid = quotePrice, paid > 0 else {
             buyText = HLWire.number(sol)
             return
         }
@@ -345,10 +350,10 @@ struct SolanaTicket: View {
         guard amount > 0 else { return report("Type how much \(quote.symbol) to spend.", isError: true) }
         let available = spendable(wallet)
         guard amount <= available + 1e-9 else {
-            let reason = quote == .sol ? " after the tip and fees" : ""
+            let reason = quote.mint == SolanaRPC.wrappedSOL ? " after the tip and fees" : ""
             return report("Not enough \(quote.symbol): this wallet can spend \(HLFormat.size(available, decimals: 4))\(reason).", isError: true)
         }
-        guard quote == .sol || (solana.balances[wallet.id]?.sol ?? 0) > 0.002 else {
+        guard quote.mint == SolanaRPC.wrappedSOL || (solana.balances[wallet.id]?.sol ?? 0) > 0.002 else {
             return report("This wallet needs a little SOL for the network fee and tip.", isError: true)
         }
         let raw = UInt64((amount * pow(10, Double(quote.decimals))).rounded())
@@ -385,7 +390,7 @@ struct SolanaTicket: View {
             var shown = false
             do {
                 let fill = try await solana.swap(
-                    walletID: wallet.id, input: input, output: output, amount: amount, outputDecimals: outputDecimals
+                    walletID: wallet.id, input: input, output: output, amount: amount, outputDecimals: outputDecimals, pool: model.solana?.pool
                 ) { stage in
                     if case let .quoted(received) = stage {
                         shown = true

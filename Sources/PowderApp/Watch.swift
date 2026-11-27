@@ -1,31 +1,56 @@
 import SwiftUI
 import UserNotifications
 
-/// A market that can be watched or alerted on: a Hyperliquid perp or a Solana token.
+/// A market that can be watched or alerted on: a Hyperliquid perp, or a Solana token in one pool.
 struct MarketRef: Codable, Equatable, Hashable, Identifiable, Sendable {
-    /// "perp:ETH" or "sol:<mint>".
+    /// "perp:ETH", "pool:<pool>|<mint>", or "sol:<mint>" for a token named without a pool.
     let id: String
     var symbol: String
     var name = ""
+    /// The Solana tab this came from, as the layout writes it, so opening it returns to the same pool.
+    var saved: String?
 
-    var mint: String? { id.hasPrefix("sol:") ? String(id.dropFirst(4)) : nil }
+    /// The token's mint, whichever pool it is watched in.
+    var mint: String? {
+        if id.hasPrefix("sol:") { return String(id.dropFirst(4)) }
+        if id.hasPrefix("pool:") { return id.split(separator: "|").last.map(String.init) }
+        return nil
+    }
+
+    var pool: String? {
+        id.hasPrefix("pool:") ? id.dropFirst(5).split(separator: "|").first.map(String.init) : nil
+    }
+
     var coin: String? { id.hasPrefix("perp:") ? String(id.dropFirst(5)) : nil }
-    var solana: SolanaToken? { mint.map { SolanaToken(address: $0, symbol: symbol, name: name) } }
+
+    var solana: SolanaToken? {
+        if let token = saved.flatMap(SolanaToken.init(savedName:)) { return token }
+        return mint.map { SolanaToken(address: $0, symbol: symbol, name: name) }
+    }
+
+    /// Where its price is found in `SolanaQuotes`: the pool's own price when it names a pool, else the token's.
+    var quoteKey: String? { pool != nil ? id : mint }
 
     static func perp(_ coin: String) -> MarketRef { MarketRef(id: "perp:\(coin)", symbol: coin) }
-    static func solana(_ token: SolanaToken) -> MarketRef { MarketRef(id: "sol:\(token.address)", symbol: token.symbol, name: token.name) }
+
+    /// A Solana market is a token in a pool: the same token in another pool is another market, with its own price.
+    static func solana(_ token: SolanaToken) -> MarketRef {
+        guard let pool = token.pool else { return MarketRef(id: "sol:\(token.address)", symbol: token.symbol, name: token.name) }
+        return MarketRef(id: "pool:\(pool.address)|\(token.address)", symbol: token.pairName, name: token.name, saved: token.savedName)
+    }
 }
 
-/// Live prices for Solana tokens that tabs other than their own need (watchlist, alerts). Polled while anyone asks.
+/// Live prices for Solana markets that tabs other than their own need (watchlist, alerts, stops). Polled while anyone asks.
+/// Keyed by `MarketRef.quoteKey`: a mint for a token's overall price, a pool reference for its price in that pool.
 @MainActor
 final class SolanaQuotes: ObservableObject {
     @Published private(set) var stats: [String: SolanaStats] = [:]
     private var wanted: [String: Set<String>] = [:]
     private var task: Task<Void, Never>?
 
-    /// Each user names the mints it needs; an empty set stops its share of the polling.
-    func want(_ mints: Set<String>, for user: String) {
-        wanted[user] = mints.isEmpty ? nil : mints
+    /// Each user names the markets it needs (by quote key); an empty set stops its share of the polling.
+    func want(_ keys: Set<String>, for user: String) {
+        wanted[user] = keys.isEmpty ? nil : keys
         if wanted.isEmpty {
             task?.cancel()
             task = nil
@@ -41,9 +66,27 @@ final class SolanaQuotes: ObservableObject {
     }
 
     private func refresh() async {
-        let mints = Array(wanted.values.reduce(into: Set<String>()) { $0.formUnion($1) }.sorted().prefix(200))
-        guard !mints.isEmpty, let fresh = try? await SolanaAPI.stats(addresses: mints) else { return }
-        for stat in fresh where stats[stat.token.address] != stat { stats[stat.token.address] = stat }
+        let keys = wanted.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        // Pools are read one by one; their tokens are also read together, as the price to fall back on.
+        let pools = keys.filter { $0.hasPrefix("pool:") }.sorted().prefix(40).compactMap { key -> (key: String, pool: String, mint: String)? in
+            let parts = key.dropFirst(5).split(separator: "|").map(String.init)
+            return parts.count == 2 ? (key, parts[0], parts[1]) : nil
+        }
+        let mints = Array(Set(keys.filter { !$0.hasPrefix("pool:") }).union(pools.map(\.mint)).sorted().prefix(200))
+        if !mints.isEmpty, let fresh = try? await SolanaAPI.stats(addresses: mints) {
+            for stat in fresh where stats[stat.token.address] != stat { stats[stat.token.address] = stat }
+        }
+        await withTaskGroup(of: (String, SolanaStats?).self) { group in
+            for item in pools {
+                group.addTask { (item.key, try? await SolanaAPI.pool(address: item.pool, base: item.mint)) }
+            }
+            for await (key, stat) in group {
+                // A pool that does not price this token itself has no price of its own: the token's overall one stands in.
+                let mint = String(key.split(separator: "|").last ?? "")
+                guard let chosen = (stat.flatMap { $0.price > 0 ? $0 : nil }) ?? stats[mint] else { continue }
+                if stats[key] != chosen { stats[key] = chosen }
+            }
+        }
     }
 }
 
@@ -116,7 +159,7 @@ struct MarketQuoteLine {
             funding = perp?.ctx.funding
             isSolana = false
         } else {
-            let stat = market.mint.flatMap { quotes.stats[$0] }
+            let stat = market.quoteKey.flatMap { quotes.stats[$0] }
             price = stat?.price
             change = stat?.change24
             volume = stat?.volume24
@@ -144,7 +187,7 @@ struct WatchlistView: View {
             .tableBand(height: 26, background: Self.band)
 
             TableRow(isHeader: true) {
-                TableCell("MARKET", width: 96, leading: true, color: Term.accent)
+                TableCell("MARKET", width: 128, leading: true, color: Term.accent)
                 TableCell("TYPE", width: 64, leading: true, color: Term.accent)
                 TableCell("LAST", width: 110, color: Term.accent)
                 TableCell("CHG %", width: 84, color: Term.accent)
@@ -193,13 +236,13 @@ struct WatchlistView: View {
         .background(MarketsView.field)
         .onAppear {
             directory.watch(true)
-            quotes.want(Set(store.items.compactMap(\.mint)), for: "watchlist")
+            quotes.want(Set(store.items.compactMap(\.quoteKey)), for: "watchlist")
         }
         .onDisappear {
             directory.watch(false)
             quotes.want([], for: "watchlist")
         }
-        .onChange(of: store.items) { _, items in quotes.want(Set(items.compactMap(\.mint)), for: "watchlist") }
+        .onChange(of: store.items) { _, items in quotes.want(Set(items.compactMap(\.quoteKey)), for: "watchlist") }
     }
 
     private func row(_ market: MarketRef, index: Int) -> some View {
@@ -208,7 +251,7 @@ struct WatchlistView: View {
         let ink = { (color: Color) in isSelected ? MarketsView.field : color }
         let decimals = PositionLine.priceDecimals(quote.price ?? 1, isSolana: quote.isSolana)
         return TableRow {
-            TableCell(market.symbol, width: 96, leading: true, color: ink(Term.accent), weight: .bold)
+            TableCell(market.symbol, width: 128, leading: true, color: ink(Term.accent), weight: .bold)
             TableCell(quote.isSolana ? "SOLANA" : "PERP", width: 64, leading: true, color: ink(MarketsView.dim))
             TableCell(quote.price.map { HLFormat.price($0, decimals: decimals) } ?? "—", width: 110, color: ink(MarketsView.text), weight: .semibold)
             TableCell(quote.change.map { HLFormat.percent($0) } ?? "—", width: 84, color: ink(quote.change.map(PowderPalette.market) ?? MarketsView.dim))
@@ -263,7 +306,7 @@ final class AlertStore: ObservableObject {
 
     func price(of market: MarketRef) -> Double? {
         if let coin = market.coin { return directory.mids[coin] ?? directory.markets[coin]?.ctx.midPx ?? directory.markets[coin]?.ctx.markPx }
-        return market.mint.flatMap { quotes.stats[$0]?.price }
+        return market.quoteKey.flatMap { quotes.stats[$0]?.price }
     }
 
     func alerts(for market: MarketRef) -> [PriceAlert] {
@@ -328,7 +371,7 @@ final class AlertStore: ObservableObject {
     /// Perp prices stream for the whole app; Solana prices are polled only while an alert waits on one.
     private func updateWatching() {
         let active = alerts.filter(\.isActive)
-        quotes.want(Set(active.compactMap(\.market.mint)), for: "alerts")
+        quotes.want(Set(active.compactMap(\.market.quoteKey)), for: "alerts")
         if active.isEmpty {
             task?.cancel()
             task = nil
@@ -429,7 +472,7 @@ struct AlertsView: View {
             .tableBand(height: 26, background: Self.band)
 
             TableRow(isHeader: true) {
-                TableCell("MARKET", width: 96, leading: true, color: Term.accent)
+                TableCell("MARKET", width: 128, leading: true, color: Term.accent)
                 TableCell("WHEN PRICE", width: 104, leading: true, color: Term.accent)
                 TableCell("LEVEL", width: 110, color: Term.accent)
                 TableCell("LAST", width: 110, color: Term.accent)
@@ -490,7 +533,7 @@ struct AlertsView: View {
         let decimals = PositionLine.priceDecimals(alert.price, isSolana: isSolana)
         let away = last.map { alert.price / $0 - 1 }
         return TableRow {
-            TableCell(alert.market.symbol, width: 96, leading: true, color: ink(Term.accent), weight: .bold)
+            TableCell(alert.market.symbol, width: 128, leading: true, color: ink(Term.accent), weight: .bold)
             TableCell(alert.isAbove ? "RISES TO" : "FALLS TO", width: 104, leading: true, color: ink(alert.isAbove ? PowderPalette.signalGreen : PowderPalette.riskCoral))
             TableCell(HLFormat.price(alert.price, decimals: decimals), width: 110, color: ink(MarketsView.text), weight: .semibold)
             TableCell(last.map { HLFormat.price($0, decimals: decimals) } ?? "—", width: 110, color: ink(MarketsView.text))

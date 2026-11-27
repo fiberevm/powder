@@ -21,6 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The download buttons serve the signed, notarized builds of the latest release, copied onto the site
+      # itself so they can be downloaded without access to the repository.
+      - name: Fetch the latest signed builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p website/downloads
+          cd website/downloads
+          if ! gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::warning::No release yet: the download buttons will not work until one is published."
+            exit 0
+          fi
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'Powder-*.zip' --pattern 'SHA256SUMS.txt'
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName > version.txt
+          mv Powder-*-apple-silicon.zip Powder-apple-silicon.zip
+          mv Powder-*-intel.zip Powder-intel.zip
+          # The checksum list names the files as they are served here.
+          shasum -a 256 Powder-apple-silicon.zip Powder-intel.zip > SHA256SUMS.txt
+          ls -la
+
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: website

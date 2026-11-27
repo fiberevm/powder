@@ -147,6 +147,26 @@ func watchlistAndAlertsKeepWhatTheUserSet() throws {
     #expect(!watchlist.toggle(.perp("ETH")))
     #expect(WatchlistStore(defaults: defaults).items == [bonk])
 
+    // The same token in two pools is two markets; each is found again in its own pool.
+    let token = SolanaToken(address: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", symbol: "BONK", name: "Bonk")
+    func inPool(_ address: String, quote: String) -> SolanaToken {
+        var copy = token
+        copy.pool = SolanaPool(
+            address: address, side: "token1", quoteMint: SolanaRPC.wrappedSOL, quoteSymbol: quote, quoteDecimals: 9,
+            exchange: "Orca", program: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+        )
+        return copy
+    }
+    let orca = MarketRef.solana(inPool("5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9", quote: "SOL"))
+    let other = MarketRef.solana(inPool("8QaXeHBrShJTdtN1rWCccBxpSVvKksQ2PCu5nufb2zbk", quote: "USDC"))
+    #expect(orca.id != other.id && orca.id != bonk.id)
+    #expect(orca.symbol == "BONK/SOL" && other.symbol == "BONK/USDC")
+    #expect(orca.mint == token.address && orca.pool == "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9")
+    #expect(orca.quoteKey == orca.id && bonk.quoteKey == token.address && MarketRef.perp("ETH").quoteKey == nil)
+    #expect(orca.solana?.pool?.address == "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9" && bonk.solana?.pool == nil)
+    let decoded = try JSONDecoder().decode(MarketRef.self, from: JSONEncoder().encode(orca))
+    #expect(decoded == orca && decoded.solana == orca.solana)
+
     // An alert above the current price waits for a rise; below it, for a fall.
     let alerts = AlertStore(defaults: defaults, directory: MarketDirectory(), quotes: SolanaQuotes())
     let up = try #require(alerts.add(.perp("ETH"), price: 1_700, current: 1_650))
@@ -255,4 +275,22 @@ func liveSwapStillSimulatesWithTheTip() async throws {
             #expect(result.logs.suffix(2) == ["Program 11111111111111111111111111111111 invoke [1]", "Program 11111111111111111111111111111111 success"])
         }
     }
+}
+
+@Test
+func aPoolTabIsSavedWithItsPoolAndAnOlderTokenTabStillOpens() throws {
+    let pool = SolanaPool(
+        address: "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9", side: "token1",
+        quoteMint: "So11111111111111111111111111111111111111112", quoteSymbol: "SOL", quoteDecimals: 9,
+        exchange: "Orca", program: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    )
+    let token = SolanaToken(address: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", symbol: "BONK", name: "Bonk | the dog", pool: pool)
+    #expect(token.pairName == "BONK/SOL")
+    #expect(SolanaToken(savedName: token.savedName) == token)
+
+    // A tab saved before pools: the token alone, which settles on its main pool when it opens.
+    let older = try #require(SolanaToken(savedName: "sol:DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263|BONK|Bonk"))
+    #expect(older.pool == nil)
+    #expect(older.pairName == "BONK")
+    #expect(SolanaToken(savedName: "pool:broken") == nil)
 }

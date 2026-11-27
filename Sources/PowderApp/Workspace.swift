@@ -397,7 +397,10 @@ final class AppRouter: ObservableObject {
     /// Shows a Solana token: its existing tab if open, otherwise a new tab in the active pane.
     func open(solana token: SolanaToken) {
         for group in groups {
-            if let existing = group.tabs.first(where: { $0.market?.solana?.address == token.address }) {
+            // A token named without a pool is at home in any tab of it; a pool only in its own.
+            if let existing = group.tabs.first(where: {
+                $0.market?.solana?.address == token.address && (token.pool == nil || $0.market?.solana?.pool?.address == token.pool?.address)
+            }) {
                 select(existing.id, in: group)
                 return
             }
@@ -415,6 +418,9 @@ final class AppRouter: ObservableObject {
         let model = PerpsModel(solana: token)
         model.onFindMarket = { [weak self] in self?.openPalette() }
         model.onOpenLink = { [weak self] url in self?.openWeb(url.absoluteString) }
+        model.onOpenMarket = { [weak self] token in self?.open(solana: token) }
+        // A tab opened on a token alone settles on a pool; the saved layout should name it.
+        model.onCoinChange = { [weak self] in self?.persist() }
         return WorkspaceTab(market: model)
     }
 
@@ -430,7 +436,7 @@ final class AppRouter: ObservableObject {
         guard SolanaAPI.hasKey, Date().timeIntervalSince(solanaTopLoaded) > 60 else { return }
         solanaTopLoaded = Date()
         Task { [weak self] in
-            if let top = try? await SolanaAPI.top() { self?.solanaTop = top }
+            if let top = try? await SolanaAPI.topPools() { self?.solanaTop = top }
         }
     }
 
@@ -443,7 +449,7 @@ final class AppRouter: ObservableObject {
         }
         solanaSearch = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled, let found = try? await SolanaAPI.search(query), !Task.isCancelled else { return }
+            guard !Task.isCancelled, let found = try? await SolanaAPI.searchPools(query), !Task.isCancelled else { return }
             self?.solanaResults = found
         }
     }
@@ -526,7 +532,8 @@ final class AppRouter: ObservableObject {
     private func solanaItems(_ tokens: [SolanaStats]) -> [PaletteItem] {
         tokens.filter { !SolanaTokens.stablecoins.contains($0.token.address) }.map { found in
             PaletteItem(
-                id: "sol:\(found.token.address)", title: found.token.symbol,
+                // One row per pool: the same token on another exchange, or against another token, is its own market.
+                id: "sol:\(found.token.address)@\(found.pairAddress ?? "")", title: found.token.pairName,
                 subtitle: "\(found.token.name) · \(found.exchange ?? "Solana") · $\(HLFormat.compact(found.liquidity)) liq · $\(HLFormat.compact(found.volume24)) vol",
                 detail: "$" + HLFormat.price(found.price, decimals: found.price > 0 ? min(max(4 - Int(floor(log10(found.price))), 2), 12) : 2),
                 change: found.change24, icon: "sun.max", logos: found.imageURL.map { [$0] } ?? [], volume: found.volume24,
