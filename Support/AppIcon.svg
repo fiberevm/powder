@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Powder</title>
+  <!-- Gunpowder: a burning fuse drawn as a rising price line, lit at the tip, with loose grains at its foot. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262626"/>
+      <stop offset="1" stop-color="#0A0A0A"/>
+    </linearGradient>
+    <linearGradient id="fuse" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#B9770E"/>
+      <stop offset="1" stop-color="#FFD166"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFE9A8" stop-opacity="0.85"/>
+      <stop offset="0.35" stop-color="#F0B429" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#F0B429" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="clip"><rect x="100" y="100" width="824" height="824" rx="186"/></clipPath>
+  </defs>
+
+  <!-- macOS icon tile: 824pt square on a 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)"/>
+  <rect x="103" y="103" width="818" height="818" rx="183" fill="none" stroke="#F0B429" stroke-opacity="0.35" stroke-width="6"/>
+
+  <!-- faint price grid -->
+  <g stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="4">
+    <line x1="180" y1="330" x2="844" y2="330"/>
+    <line x1="180" y1="512" x2="844" y2="512"/>
+    <line x1="180" y1="694" x2="844" y2="694"/>
+  </g>
+
+  <!-- loose powder grains at the foot of the fuse -->
+  <g fill="#F0B429">
+    <circle cx="196" cy="778" r="15" opacity="0.9"/>
+    <circle cx="246" cy="800" r="11" opacity="0.7"/>
+    <circle cx="292" cy="772" r="13" opacity="0.8"/>
+    <circle cx="338" cy="802" r="9" opacity="0.55"/>
+    <circle cx="232" cy="752" r="8" opacity="0.6"/>
+    <circle cx="384" cy="786" r="7" opacity="0.4"/>
+    <circle cx="160" cy="806" r="8" opacity="0.5"/>
+  </g>
+
+  <!-- the fuse, rising like a chart -->
+  <polyline points="214,726 356,604 452,668 600,476 688,538 742,410"
+            fill="none" stroke="url(#fuse)" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- braid marks -->
+  <polyline points="214,726 356,604 452,668 600,476 688,538 742,410"
+            fill="none" stroke="#5A3A05" stroke-opacity="0.55" stroke-width="46" stroke-linejoin="round" stroke-dasharray="5 30"/>
+
+  <!-- the spark -->
+  <circle cx="762" cy="346" r="190" fill="url(#glow)" clip-path="url(#clip)"/>
+  <g stroke="#FFD166" stroke-linecap="round">
+    <line x1="762" y1="346" x2="762" y2="196" stroke-width="20"/>
+    <line x1="762" y1="346" x2="884" y2="262" stroke-width="20"/>
+    <line x1="762" y1="346" x2="902" y2="372" stroke-width="16"/>
+    <line x1="762" y1="346" x2="852" y2="454" stroke-width="14"/>
+    <line x1="762" y1="346" x2="648" y2="268" stroke-width="16"/>
+    <line x1="762" y1="346" x2="676" y2="198" stroke-width="12"/>
+    <line x1="762" y1="346" x2="842" y2="188" stroke-width="12"/>
+  </g>
+  <circle cx="762" cy="346" r="46" fill="#FFF4CF"/>
+</svg>
