@@ -23,13 +23,13 @@ const products = ["Powder", "Hyperliquid web", "Jupiter", "DEX Screener", "GMGN"
 const charts = [
   {
     title: "Time to first chart",
-    unit: "seconds, first visit",
-    rows: [[0.7, "0.7 s"], [2.1, "2.1 s"], [2.3, "2.3 s"], [3.2, "3.2 s"], [2.8, "2.8 s"]],
+    unit: "milliseconds, first visit",
+    rows: [[696, "696 ms"], [2055, "2,055 ms"], [2253, "2,253 ms"], [3213, "3,213 ms"], [2798, "2,798 ms"]],
   },
   {
     title: "Memory in use",
-    unit: "GB, whole app or whole browser",
-    rows: [[0.34, "0.34 GB"], [2.1, "2.1 GB"], [1.5, "1.5 GB"], [2.0, "2.0 GB"], [1.7, "1.7 GB"]],
+    unit: "MB, whole app or whole browser",
+    rows: [[341, "341 MB"], [2091, "2,091 MB"], [1486, "1,486 MB"], [1974, "1,974 MB"], [1714, "1,714 MB"]],
   },
   {
     title: "Processor while idle",
@@ -90,7 +90,7 @@ document.getElementById("charts").innerHTML = charts
 
 document.getElementById("bench-method").textContent =
   "Method. Each figure is the average of its runs. Powder: time from the process starting until candles are drawn (eleven launches); memory and processor for the whole app with two live markets, each a chart, an order book and a trade tape. " +
-  "Web: a fresh Chrome profile with one tab; time from the page starting to load, in an already-open browser, until its chart canvas holds candles; memory and processor summed over every process Chrome needs for that tab (an empty Chrome is 0.3 GB and 0.3%). " +
+  "Web: a fresh Chrome profile with one tab; time from the page starting to load, in an already-open browser, until its chart canvas holds candles; memory and processor summed over every process Chrome needs for that tab (an empty Chrome is 280 MB and 0.3%). " +
   "Processor is the average over 30 seconds with nothing touched; Powder measured 5.3% with its two markets, shown here per market. All windows maximised. Measured November 2026 on an M4 Max MacBook Pro, macOS 26.6, Chrome 158. " +
   "DEX Screener is a chart viewer with no order book or tape, so it has less to keep up to date. Axiom's chart sits behind a login and was not measured.";
 
