@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Powder: a native trading terminal for Hyperliquid and Solana</title>
+<meta name="description" content="Powder is a native macOS trading terminal for Hyperliquid and Solana. Keyboard-first, monospaced, fast. Orders are signed on your Mac.">
+<meta property="og:title" content="Powder">
+<meta property="og:description" content="A native macOS trading terminal for Hyperliquid and Solana.">
+<meta property="og:image" content="screenshot.png">
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <img class="icon" src="icon.png" width="88" height="88" alt="">
+    <h1>Powder</h1>
+    <p class="lede">A native macOS trading terminal for Hyperliquid and Solana.<br>Keyboard-first, monospaced, fast.</p>
+    <p class="actions">
+      <a class="button primary" href="https://github.com/fiberevm/powder">Source on GitHub</a>
+      <a class="button" href="#build">Build it</a>
+    </p>
+  </header>
+
+  <figure>
+    <img src="screenshot.png" width="2400" height="588" alt="Powder showing the live markets table beside a BTC candle chart">
+  </figure>
+
+  <section class="grid" aria-label="Features">
+    <article>
+      <h2>Signed on your Mac</h2>
+      <p>Keys live in the macOS Keychain. Orders go straight to the exchange: no account, no server of ours in between.</p>
+    </article>
+    <article>
+      <h2>One key, two chains</h2>
+      <p>A wallet has a Hyperliquid address and a Solana address. Perps, and any Solana token through Jupiter and Nozomi.</p>
+    </article>
+    <article>
+      <h2>Built for the keyboard</h2>
+      <p><kbd>⌘P</kbd> finds any market. <kbd>⇧B</kbd> and <kbd>⇧S</kbd> trade. Split panes, drag tabs, and the layout stays put.</p>
+    </article>
+    <article>
+      <h2>Trade from the chart</h2>
+      <p>Right-click for a limit order, an alert or a price line. Entry, liquidation and resting orders are drawn where they sit.</p>
+    </article>
+    <article>
+      <h2>Everything in one window</h2>
+      <p>Positions, history, watchlist, alerts and liquidations as tabs, next to web pages you want in view.</p>
+    </article>
+    <article>
+      <h2>An assistant that can't trade</h2>
+      <p><kbd>⌘K</kbd> asks Claude or Codex to arrange your workspace and read data. It has no tool that places an order.</p>
+    </article>
+  </section>
+
+  <section id="build" class="build">
+    <h2>Build it</h2>
+    <p>macOS 14 or later, Xcode 15 or later.</p>
+<pre><code>git clone https://github.com/fiberevm/powder.git
+cd powder
+./Scripts/package_app.sh &amp;&amp; open .build/Powder.app</code></pre>
+  </section>
+
+  <footer>
+    <p>Powder trades on mainnet with real funds, and its trade keys send orders with no confirmation step. It is provided as is and is not financial advice.</p>
+  </footer>
+</main>
+</body>
+</html>
