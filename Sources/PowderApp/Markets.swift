@@ -229,8 +229,9 @@ struct MarketsView: View {
         }
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 26)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 26, maxHeight: 26, alignment: .leading)
         .background(Self.band)
+        .clipped()
     }
 
     /// Whole-exchange totals.
@@ -258,7 +259,7 @@ struct MarketsView: View {
         }
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 24)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .leading)
         .clipped()
         .overlay(alignment: .bottom) { TermRule() }
     }
@@ -304,7 +305,7 @@ struct MarketsView: View {
         .font(Term.font(10.5))
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 22)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 22, maxHeight: 22, alignment: .leading)
         .background(Self.band)
         .clipped()
     }

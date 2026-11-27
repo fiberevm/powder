@@ -41,7 +41,7 @@ final class PowderMCPServer {
 
     /// Lets the user's own agents connect too: `~/Library/Application Support/Powder/mcp.json`, readable only by them.
     private func publishURL() {
-        guard let url, let folder = Self.supportFolder else { return }
+        guard Launch.profile == nil, let url, let folder = Self.supportFolder else { return }
         let file = folder.appendingPathComponent("mcp.json")
         let body = #"{"mcpServers":{"powder":{"type":"http","url":"\#(url)"}}}"#
         try? Data(body.utf8).write(to: file, options: .atomic)
@@ -182,7 +182,7 @@ final class PowderTools {
 
     static let instructions = """
     Powder is a macOS trading terminal for Hyperliquid perpetuals. The window is a tree of panes; each pane has tabs. \
-    A tab is a market (named by its coin, e.g. BTC), one of the views "markets", "positions", "launchpad", or a web page (named web:<url>). \
+    A tab is a market (named by its coin, e.g. BTC), one of the views "markets", "positions", "history", "watchlist", "alerts", "liquidations", "launchpad", or a web page (named web:<url>). \
     Call get_layout before rearranging. Panes are numbered left-to-right, top-to-bottom, starting at 1, and renumber after every change. \
     These tools cannot place or cancel orders.
     """
@@ -207,19 +207,19 @@ final class PowderTools {
             "placement": string("Where to put it. Default 'tab'.", options: ["tab", "split_right", "split_down"]),
             "pane": ["type": "integer", "description": "Pane number to open in or split from. Default: the active pane."],
         ], required: ["coin"]),
-        tool("open_view", "Show the all-markets table, the positions table, or the Solana launchpad.", [
-            "view": string("Which view.", options: ["markets", "positions", "launchpad"]),
+        tool("open_view", "Show the all-markets table, the positions table, the trade history, or the Solana launchpad.", [
+            "view": string("Which view.", options: ["markets", "positions", "history", "watchlist", "alerts", "liquidations", "launchpad"]),
         ], required: ["view"]),
         tool("open_web", "Open a website in a new web tab in the active pane (or the given pane).", [
             "address": string("A URL, a bare domain like x.com/someone, or words to search for."),
             "pane": ["type": "integer", "description": "Pane number. Default: the active pane."],
         ], required: ["address"]),
         tool("focus", "Select a tab by name, or make a pane active.", [
-            "tab": string("Tab name: a coin, or markets / positions / launchpad."),
+            "tab": string("Tab name: a coin, or markets / positions / history / launchpad."),
             "pane": ["type": "integer", "description": "Pane number."],
         ]),
         tool("close_tab", "Close a tab. A pane closes with its last tab. The window's final tab cannot be closed.", [
-            "tab": string("Tab name: a coin, or markets / positions / launchpad."),
+            "tab": string("Tab name: a coin, or markets / positions / history / launchpad."),
             "pane": ["type": "integer", "description": "Pane number, if the name is open in more than one pane."],
         ], required: ["tab"]),
         tool("move_tab", "Move a tab into another pane, or split that pane with it.", [
@@ -265,7 +265,7 @@ final class PowderTools {
             "address": string("Mint address. Use search_solana_tokens to find it."),
             "pane": ["type": "integer", "description": "Pane number. Default: the active pane."],
         ], required: ["address"]),
-        tool("get_accounts", "Every wallet in the app (name and public address only): balances, open perp positions with live PnL and liquidation price, spot holdings, and resting orders."),
+        tool("get_accounts", "Every wallet in the app (name and public addresses only): Hyperliquid balances, open perp positions with live PnL and liquidation price, spot holdings and resting orders, and the same wallet's Solana balances with cost and PnL."),
         tool("screenshot", "Save a picture of the Powder window as a PNG in Powder's support folder and return its path. Web tabs may come out blank."),
     ]
 
@@ -304,8 +304,10 @@ final class PowderTools {
             switch arguments["view"] as? String {
             case "markets": router.openMarkets()
             case "positions": router.openPositions()
+            case "history": router.openHistory()
+            case "watchlist", "alerts", "liquidations": router.openBoard(WorkspaceTab.Board(rawValue: arguments["view"] as? String ?? "") ?? .watchlist)
             case "launchpad": router.openLaunchpad()
-            default: throw ToolError("view must be markets, positions or launchpad.")
+            default: throw ToolError("view must be markets, positions, history, watchlist, alerts, liquidations or launchpad.")
             }
             return json(layout(router))
 
@@ -548,8 +550,28 @@ final class PowderTools {
     private func accounts(in router: AppRouter) async -> [String: Any] {
         let wallets = router.wallets
         for wallet in wallets.wallets { await wallets.refresh(wallet.id) }
+        for wallet in wallets.solana.wallets { await wallets.solana.refresh(wallet.id) }
         return ["wallets": wallets.wallets.map { wallet -> [String: Any] in
             var info: [String: Any] = ["name": wallet.name, "address": wallet.tradingAddress, "selected": wallet.id == wallets.selectedID]
+            if let address = wallet.solanaAddress {
+                info["solana_address"] = address
+                let solana = wallets.solana
+                if let balances = solana.balances[wallet.id] {
+                    info["solana_sol"] = balances.sol
+                    info["solana_tokens"] = balances.holdings.compactMap { holding -> [String: Any]? in
+                        guard let price = solana.prices[holding.mint], holding.amount * price.price >= 0.01 else { return nil }
+                        var row: [String: Any] = [
+                            "symbol": price.symbol, "address": holding.mint, "amount": holding.amount,
+                            "price_usd": price.price, "value_usd": holding.amount * price.price,
+                        ]
+                        if let cost = solana.costs[SolanaWalletProvider.costKey(wallet.id, holding.mint)] {
+                            row["average_cost_usd"] = cost
+                            row["unrealized_pnl_usd"] = (price.price - cost) * holding.amount
+                        }
+                        return row
+                    }
+                }
+            }
             guard let account = wallets.accounts[wallet.id] else {
                 info["error"] = wallets.accountErrors[wallet.id] ?? "not loaded"
                 return info
@@ -582,6 +604,7 @@ final class PowderTools {
             "volume_24h_usd": stats.volume24.rounded(), "liquidity_usd": stats.liquidity.rounded(), "market_cap_usd": stats.marketCap.rounded(),
         ]
         if let holders = stats.holders { info["holders"] = holders }
+        if !stats.exchanges.isEmpty { info["exchanges"] = stats.exchanges }
         return info
     }
 

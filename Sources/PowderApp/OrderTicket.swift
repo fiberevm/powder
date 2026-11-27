@@ -10,6 +10,15 @@ enum OrderSound {
         ping?.stop()
         ping?.play()
     }
+
+    private static let basso = NSSound(named: "Basso")
+
+    /// An order that was shown as done did not go through.
+    static func failed() {
+        ping?.stop()
+        basso?.stop()
+        basso?.play()
+    }
 }
 
 /// Buy / sell for the tab's market: wallet selector, market or limit, a size, and the two buttons.
@@ -17,6 +26,7 @@ enum OrderSound {
 struct OrderTicket: View {
     @ObservedObject var model: PerpsModel
     @EnvironmentObject private var wallets: WalletProvider
+    @EnvironmentObject private var directory: MarketDirectory
     @Environment(\.openSettings) private var openSettings
 
     private enum Kind { case market, limit }
@@ -214,6 +224,24 @@ struct OrderTicket: View {
             }
             ForEach(orders) { order in
                 orderRow(order, wallet: wallet)
+            }
+            if orders.count > 1 {
+                Button {
+                    Task {
+                        let result = await wallets.cancelAll(walletID: wallet.id, coin: model.coin, directory: directory)
+                        messageIsError = result.hasPrefix("Cancel failed")
+                        message = result
+                    }
+                } label: {
+                    Text("CANCEL ALL \(orders.count) ORDERS")
+                        .font(Term.font(10.5, .semibold))
+                        .foregroundStyle(PowderPalette.riskCoral)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 20)
+                        .overlay(Rectangle().stroke(PowderPalette.riskCoral.opacity(0.6), lineWidth: 1))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
         .lineLimit(1)
@@ -522,7 +550,14 @@ struct OrderTicket: View {
     private func send(_ order: WalletProvider.PreparedOrder) {
         isSending = true
         messageIsError = false
-        message = "Sending…"
+        // A market order is shown as done the moment it is sent; the exchange's answer confirms or corrects it.
+        let isInstant = order.isMarket && order.expectedPrice != nil
+        if isInstant, let expected = order.expectedPrice {
+            OrderSound.done()
+            message = "\(order.isBuy ? "Bought" : "Sold") \(HLWire.number(order.size)) \(order.market.name) at ≈\(HLFormat.price(expected, decimals: model.priceDecimals)) · confirming…"
+        } else {
+            message = "Sending…"
+        }
         let started = ContinuousClock.now
         Task {
             defer { isSending = false }
@@ -531,16 +566,21 @@ struct OrderTicket: View {
                 let elapsed = ContinuousClock.now - started
                 let took = " \(Int(elapsed.components.seconds * 1_000 + elapsed.components.attoseconds / 1_000_000_000_000_000)) ms"
                 messageIsError = false
-                OrderSound.done()
+                if !isInstant { OrderSound.done() }
                 switch outcome {
                 case let .filled(size, price):
                     message = "Filled \(HLWire.number(size)) \(order.market.name) at \(HLFormat.price(price, decimals: model.priceDecimals)) in\(took)."
+                case .resting, .done where isInstant:
+                    // Shown as filled, but nothing traded: the account has already been put back.
+                    OrderSound.failed()
+                    fail("Not filled: the price moved past this wallet's slippage. Nothing was traded.")
                 case .resting:
                     message = "Order resting on the book in\(took)."
                 case .done:
                     message = "Sent in\(took)."
                 }
             } catch {
+                if isInstant { OrderSound.failed() }
                 let text = error.localizedDescription
                 // The exchange's message does not say where the money is.
                 if text.localizedCaseInsensitiveContains("margin"),

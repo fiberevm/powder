@@ -1,3 +1,4 @@
+import UserNotifications
 import AppKit
 import SwiftUI
 
@@ -14,13 +15,25 @@ struct WorkspaceTab: Identifiable {
     var positions: PositionsModel?
     /// Set on a web tab.
     var web: WebTabModel?
+    /// Set on the trade History tab.
+    var history: HistoryModel?
+    /// Set on the tabs whose state lives in the router: watchlist, alerts, liquidations.
+    var board: Board?
 
-    var isLaunchpad: Bool { market == nil && list == nil && positions == nil && web == nil }
+    enum Board: String, CaseIterable {
+        case watchlist, alerts, liquidations
+
+        var title: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    }
+
+    var isLaunchpad: Bool { market == nil && list == nil && positions == nil && web == nil && history == nil && board == nil }
 
     /// How the tab is written in the saved layout.
     @MainActor var savedName: String {
         if let market { return market.solana?.savedName ?? "perp:\(market.coin)" }
         if positions != nil { return "positions" }
+        if history != nil { return "history" }
+        if let board { return board.rawValue }
         if let web { return "web:\(web.url?.absoluteString ?? "")" }
         return list == nil ? "launchpad" : "markets"
     }
@@ -201,6 +214,11 @@ final class AppRouter: ObservableObject {
     let directory = MarketDirectory()
     let keys = KeyMonitor()
     let wallets: WalletProvider
+    let watchlist: WatchlistStore
+    let alerts: AlertStore
+    let solanaQuotes = SolanaQuotes()
+    let triggers: SolanaTriggerStore
+    let liquidations = LiquidationsModel()
 
     private let defaults: UserDefaults
     private static let layoutKey = "workspace.layout"
@@ -208,6 +226,10 @@ final class AppRouter: ObservableObject {
     init(defaults: UserDefaults = .standard, vault: KeyVault = KeychainVault()) {
         self.defaults = defaults
         wallets = WalletProvider(defaults: defaults, vault: vault)
+        watchlist = WatchlistStore(defaults: defaults)
+        alerts = AlertStore(defaults: defaults, directory: directory, quotes: solanaQuotes)
+        triggers = SolanaTriggerStore(defaults: defaults, solana: wallets.solana, quotes: solanaQuotes)
+        NotificationPresenter.center?.delegate = NotificationPresenter.shared
         let saved = defaults.data(forKey: Self.layoutKey)
             .flatMap { try? JSONDecoder().decode(SavedLayout.self, from: $0) }
         let fallback = PaneGroup(tabs: [])
@@ -375,12 +397,25 @@ final class AppRouter: ObservableObject {
     private func makeSolanaTab(_ token: SolanaToken) -> WorkspaceTab {
         let model = PerpsModel(solana: token)
         model.onFindMarket = { [weak self] in self?.openPalette() }
+        model.onOpenLink = { [weak self] url in self?.openWeb(url.absoluteString) }
         return WorkspaceTab(market: model)
     }
 
     /// Solana tokens matching what is typed in the palette, fetched a moment after typing stops.
     @Published private(set) var solanaResults: [SolanaStats] = []
     private var solanaSearch: Task<Void, Never>?
+
+    /// The most traded Solana tokens, listed among the perps before anything is typed. Refreshed each minute.
+    @Published private(set) var solanaTop: [SolanaStats] = []
+    private var solanaTopLoaded = Date.distantPast
+
+    private func loadSolanaTop() {
+        guard SolanaAPI.hasKey, Date().timeIntervalSince(solanaTopLoaded) > 60 else { return }
+        solanaTopLoaded = Date()
+        Task { [weak self] in
+            if let top = try? await SolanaAPI.top() { self?.solanaTop = top }
+        }
+    }
 
     private func searchSolana(_ text: String) {
         solanaSearch?.cancel()
@@ -420,6 +455,7 @@ final class AppRouter: ObservableObject {
         paletteQuery = commands ? ">" : ""
         paletteSelection = 0
         isPaletteOpen = true
+        loadSolanaTop()
         ChartInput.isSuspended = true
     }
 
@@ -452,29 +488,40 @@ final class AppRouter: ObservableObject {
             return PaletteSearch.filter(commandItems, by: String(paletteQuery.dropFirst()))
         }
         let query = paletteQuery.trimmingCharacters(in: .whitespaces)
-        if query.isEmpty { return marketItems }
-        var items = PaletteSearch.filter(marketItems + commandItems, by: paletteQuery)
+        // Hyperliquid perps and Solana tokens are one list, most traded first.
+        func byVolume(_ items: [PaletteItem]) -> [PaletteItem] {
+            items.enumerated().sorted { $0.element.volume != $1.element.volume ? $0.element.volume > $1.element.volume : $0.offset < $1.offset }.map(\.element)
+        }
+        if query.isEmpty { return byVolume(perpItems + solanaItems(solanaTop)) + viewItems }
+        // Real matches from both venues rank together; scattered-letter guesses and commands follow.
+        let perps = PaletteSearch.matches(perpItems, by: paletteQuery)
+        var items = byVolume(perps.prefix + perps.exact + solanaItems(solanaResults)) + perps.fuzzy
+            + PaletteSearch.filter(viewItems + commandItems, by: paletteQuery)
         // Something that reads as an address can be opened as a web tab straight from here.
         let visit = PaletteItem(
             id: "web:go", title: "Open \(query)", subtitle: "Web tab", icon: "globe",
             run: { [weak self] in self?.openWeb(query) }
         )
-        items += solanaResults.map { found in
-            PaletteItem(
-                id: "sol:\(found.token.address)", title: found.token.symbol,
-                subtitle: "\(found.token.name) · Solana · $\(HLFormat.compact(found.liquidity)) liq · $\(HLFormat.compact(found.volume24)) vol",
-                detail: "$" + HLFormat.price(found.price, decimals: found.price > 0 ? min(max(4 - Int(floor(log10(found.price))), 2), 12) : 2),
-                change: found.change24, icon: "sun.max", section: "solana",
-                run: { [weak self] in self?.open(solana: found.token) }
-            )
-        }
         if WebTabModel.looksLikeAddress(query) { items.insert(visit, at: 0) } else if items.isEmpty { items.append(visit) }
         return items
     }
 
-    private var marketItems: [PaletteItem] {
+    private func solanaItems(_ tokens: [SolanaStats]) -> [PaletteItem] {
+        tokens.filter { !SolanaTokens.stablecoins.contains($0.token.address) }.map { found in
+            PaletteItem(
+                id: "sol:\(found.token.address)", title: found.token.symbol,
+                subtitle: "\(found.token.name) · \(found.exchange ?? "Solana") · $\(HLFormat.compact(found.liquidity)) liq · $\(HLFormat.compact(found.volume24)) vol",
+                detail: "$" + HLFormat.price(found.price, decimals: found.price > 0 ? min(max(4 - Int(floor(log10(found.price))), 2), 12) : 2),
+                change: found.change24, icon: "sun.max", logos: found.imageURL.map { [$0] } ?? [], volume: found.volume24,
+                section: "solana",
+                run: { [weak self] in self?.open(solana: found.token) }
+            )
+        }
+    }
+
+    private var perpItems: [PaletteItem] {
         let open = Set(groups.flatMap(\.tabs).compactMap { $0.market?.coin })
-        var items = directory.markets.values
+        return directory.markets.values
             .sorted { $0.ctx.dayNtlVlm > $1.ctx.dayNtlVlm }
             .map { market in
                 let price = directory.mids[market.name] ?? market.ctx.midPx ?? market.ctx.markPx
@@ -486,10 +533,15 @@ final class AppRouter: ObservableObject {
                     detail: HLFormat.price(price, decimals: decimals),
                     change: market.dayChange,
                     icon: "chart.xyaxis.line",
+                    logos: LogoStore.perp(market.name), volume: market.ctx.dayNtlVlm,
                     section: open.contains(market.name) ? "open" : nil,
                     run: { [weak self] in self?.open(coin: market.name) }
                 )
             }
+    }
+
+    private var viewItems: [PaletteItem] {
+        var items: [PaletteItem] = []
         items.append(PaletteItem(
             id: "markets", title: "Markets", subtitle: "Every perp, live",
             icon: "tablecells", run: { [weak self] in self?.openMarkets() }
@@ -497,6 +549,22 @@ final class AppRouter: ObservableObject {
         items.append(PaletteItem(
             id: "positions", title: "Positions", subtitle: "Every wallet, live PnL",
             icon: "list.bullet.rectangle", run: { [weak self] in self?.openPositions() }
+        ))
+        items.append(PaletteItem(
+            id: "history", title: "History", subtitle: "Every wallet's trades, volume, fees and realized PnL",
+            icon: "clock.arrow.circlepath", run: { [weak self] in self?.openHistory() }
+        ))
+        items.append(PaletteItem(
+            id: "watchlist", title: "Watchlist", subtitle: "The markets you follow, across Hyperliquid and Solana",
+            icon: "star", run: { [weak self] in self?.openBoard(.watchlist) }
+        ))
+        items.append(PaletteItem(
+            id: "alerts", title: "Alerts", subtitle: "Price alerts",
+            icon: "bell", run: { [weak self] in self?.openBoard(.alerts) }
+        ))
+        items.append(PaletteItem(
+            id: "liquidations", title: "Liquidations", subtitle: "Every liquidation on Hyperliquid, live",
+            icon: "flame", run: { [weak self] in self?.openBoard(.liquidations) }
         ))
         items.append(PaletteItem(
             id: "web", title: "Web", subtitle: "A website in a tab: type an address here, or open a blank one",
@@ -533,6 +601,11 @@ final class AppRouter: ObservableObject {
             command("Web: New Tab", "", "globe") { $0.openWeb() },
             command("Markets: Open", "⇧⌘M", "tablecells") { $0.openMarkets() },
             command("Positions: Open", "⇧⌘O", "list.bullet.rectangle") { $0.openPositions() },
+            command("History: Open", "⇧⌘Y", "clock.arrow.circlepath") { $0.openHistory() },
+            command("Watchlist: Open", "", "star") { $0.openBoard(.watchlist) },
+            command("Alerts: Open", "", "bell") { $0.openBoard(.alerts) },
+            command("Liquidations: Open", "", "flame") { $0.openBoard(.liquidations) },
+            command("Orders: Cancel All Resting Orders", "", "xmark.circle") { $0.cancelAllOrders() },
             command("Launchpad: Open", "⌘L", "square.stack.3d.up") { $0.openLaunchpad() },
             command("Preferences: Light Theme", theme == .light ? "current" : "", "sun.max") { $0.setTheme(.light) },
             command("Preferences: Dark Theme", theme == .dark ? "current" : "", "moon") { $0.setTheme(.dark) },
@@ -577,6 +650,11 @@ final class AppRouter: ObservableObject {
 
     /// Opens the market behind a position, trading with the wallet that holds it.
     func openMarket(for row: PositionRow) {
+        if let token = row.solana {
+            wallets.selectedID = row.walletID
+            open(solana: token)
+            return
+        }
         guard row.kind == .perp else { return }
         wallets.selectedID = row.walletID
         open(coin: row.coin)
@@ -594,6 +672,44 @@ final class AppRouter: ObservableObject {
     /// Brings the all-markets table forward, opening its tab in the active pane if it was closed.
     func openMarkets() {
         openSingleton(where: { $0.list != nil }) { WorkspaceTab(list: MarketsModel()) }
+    }
+
+    /// Brings the watchlist, alerts or liquidations forward, opening its tab in the active pane if it was closed.
+    func openBoard(_ board: WorkspaceTab.Board) {
+        openSingleton(where: { $0.board == board }) { WorkspaceTab(board: board) }
+    }
+
+    func open(_ market: MarketRef) {
+        if let token = market.solana { open(solana: token) } else if let coin = market.coin { open(coin: coin) }
+    }
+
+    /// The market in the active tab, for watching it.
+    var activeMarketRef: MarketRef? {
+        guard let market = activeMarket else { return nil }
+        return market.solana.map(MarketRef.solana) ?? .perp(market.coin)
+    }
+
+    /// Cancels every resting order in every wallet. The result is shown on the active market tab.
+    func cancelAllOrders() {
+        Task {
+            let result = await wallets.cancelAll(directory: directory)
+            activeMarket?.notify(result)
+        }
+    }
+
+    /// Brings the trade history forward, opening its tab in the active pane if it was closed.
+    func openHistory() {
+        openSingleton(where: { $0.history != nil }) { WorkspaceTab(history: HistoryModel()) }
+    }
+
+    /// Opens the market a past trade was in.
+    func openMarket(for record: TradeRecord) {
+        wallets.selectedID = record.walletID
+        if let token = record.solana {
+            open(solana: token)
+        } else if directory.markets[record.market] != nil {
+            open(coin: record.market)
+        }
     }
 
     /// Brings the all-wallets positions table forward, opening its tab in the active pane if it was closed.
@@ -863,10 +979,14 @@ final class AppRouter: ObservableObject {
     /// Only one Markets tab is restored, like the launchpad.
     private var hasMarkets = false
     private var hasPositions = false
+    private var hasHistory = false
+    private var boards: Set<WorkspaceTab.Board> = []
 
     private func install(_ saved: SavedLayout) {
         hasMarkets = false
         hasPositions = false
+        hasHistory = false
+        boards = []
         var hasLaunchpad = false
         var active: UUID?
         let built = build(saved, hasLaunchpad: &hasLaunchpad, active: &active).flatMap { Self.pruned($0) }
@@ -894,6 +1014,12 @@ final class AppRouter: ObservableObject {
                 } else if entry == "positions", !hasPositions {
                     hasPositions = true
                     tabs.append(WorkspaceTab(positions: PositionsModel()))
+                } else if entry == "history", !hasHistory {
+                    hasHistory = true
+                    tabs.append(WorkspaceTab(history: HistoryModel()))
+                } else if let board = WorkspaceTab.Board(rawValue: entry), !boards.contains(board) {
+                    boards.insert(board)
+                    tabs.append(WorkspaceTab(board: board))
                 }
             }
             let group = PaneGroup(tabs: tabs, selectedIndex: selected)
@@ -1075,9 +1201,72 @@ final class AppRouter: ObservableObject {
             case (KeyCode.left, _), (_, "h"): list.stepSort(-1)
             case (_, "r"): list.reverseSort()
             case (KeyCode.escape, _): list.select(nil)
+            case (_, "f"):
+                // F stars the selected market into the watchlist, or takes it back out.
+                guard let coin = list.selection else { return false }
+                watchlist.toggle(.perp(coin))
             case (KeyCode.return, _), (KeyCode.enter, _):
                 guard let coin = list.selection else { return false }
                 open(coin: coin)
+            default: return false
+            }
+            return true
+        }
+
+        if let board = activeGroup.selectedTab?.board {
+            switch board {
+            case .watchlist:
+                switch (key.keyCode, key.characters) {
+                case (KeyCode.down, _), (_, "j"): watchlist.move(key.shift ? 10 : 1)
+                case (KeyCode.up, _), (_, "k"): watchlist.move(key.shift ? -10 : -1)
+                case (KeyCode.delete, _), (_, "x"):
+                    guard let id = watchlist.selection else { return false }
+                    watchlist.remove(id)
+                case (KeyCode.return, _), (KeyCode.enter, _), (_, "o"):
+                    guard let market = watchlist.items.first(where: { $0.id == watchlist.selection }) else { return false }
+                    open(market)
+                case (KeyCode.escape, _): watchlist.selection = nil
+                default: return false
+                }
+            case .alerts:
+                switch (key.keyCode, key.characters) {
+                case (KeyCode.down, _), (_, "j"): alerts.move(key.shift ? 10 : 1)
+                case (KeyCode.up, _), (_, "k"): alerts.move(key.shift ? -10 : -1)
+                case (_, "a"): alerts.entryFocusRequest += 1
+                case (_, "c"): alerts.clearTriggered()
+                case (KeyCode.delete, _), (_, "x"):
+                    guard let id = alerts.selection else { return false }
+                    alerts.remove(id)
+                case (KeyCode.return, _), (KeyCode.enter, _), (_, "o"):
+                    guard let alert = alerts.alerts.first(where: { $0.id == alerts.selection }) else { return false }
+                    open(alert.market)
+                case (KeyCode.escape, _): alerts.selection = nil
+                default: return false
+                }
+            case .liquidations:
+                switch (key.keyCode, key.characters) {
+                case (KeyCode.down, _), (_, "j"): liquidations.move(key.shift ? 10 : 1)
+                case (KeyCode.up, _), (_, "k"): liquidations.move(key.shift ? -10 : -1)
+                case (_, "m"): liquidations.cycleMinimum()
+                case (KeyCode.return, _), (KeyCode.enter, _), (_, "o"):
+                    guard let coin = liquidations.selected?.coin, directory.markets[coin] != nil else { return false }
+                    open(coin: coin)
+                case (KeyCode.escape, _): liquidations.selection = nil
+                default: return false
+                }
+            }
+            return true
+        }
+
+        if let history = activeGroup.selectedTab?.history {
+            switch (key.keyCode, key.characters) {
+            case (KeyCode.down, _), (_, "j"): history.move(key.shift ? 10 : 1)
+            case (KeyCode.up, _), (_, "k"): history.move(key.shift ? -10 : -1)
+            case (_, "r"): Task { await history.load(wallets: wallets) }
+            case (_, "o"), (KeyCode.return, _), (KeyCode.enter, _):
+                guard let record = history.selected else { return false }
+                openMarket(for: record)
+            case (KeyCode.escape, _): history.select(nil)
             default: return false
             }
             return true
@@ -1130,6 +1319,10 @@ final class AppRouter: ObservableObject {
             case "c": perps.cycleStyle()
             case "d": perps.setDrawTool(perps.drawTool == .trend ? nil : .trend)
             case "o": perps.ticketFocusRequest += 1
+            case "w":
+                // W stars this market into the watchlist, or takes it back out.
+                guard let market = activeMarketRef else { return false }
+                perps.notify(watchlist.toggle(market) ? "Added \(market.symbol) to the watchlist" : "Removed \(market.symbol) from the watchlist")
             case "-", "_": perps.zoom(-1)
             case "=", "+": perps.zoom(1)
             case "?": perps.isHelpOpen = true

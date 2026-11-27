@@ -106,7 +106,7 @@ enum EthKeyError: LocalizedError {
     case invalidPrivateKey
 
     var errorDescription: String? {
-        "That is not a valid private key. It should be 64 hexadecimal characters, with or without 0x."
+        "That is not a valid private key. Paste 64 hexadecimal characters (with or without 0x), or the key a Solana wallet exports."
     }
 }
 

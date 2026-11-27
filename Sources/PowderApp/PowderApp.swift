@@ -4,13 +4,17 @@ import SwiftUI
 struct PowderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
-    @StateObject private var router = AppRouter()
+    @StateObject private var router = AppRouter(defaults: Launch.defaults)
 
     var body: some Scene {
         WindowGroup {
             RootView(router: router)
                 .environmentObject(model)
                 .environmentObject(router.wallets)
+                .environmentObject(router.alerts)
+                .environmentObject(router.directory)
+                .environmentObject(router.liquidations)
+                .environmentObject(router.triggers)
                 .tint(PowderPalette.scopeBlue)
                 .preferredColorScheme(router.theme.colorScheme)
                 .frame(minWidth: 980, minHeight: 680)
@@ -43,6 +47,15 @@ struct PowderApp: App {
                     router.openPositions()
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+
+                Button("History") {
+                    router.openHistory()
+                }
+                .keyboardShortcut("y", modifiers: [.command, .shift])
+
+                Button("Watchlist") { router.openBoard(.watchlist) }
+                Button("Alerts") { router.openBoard(.alerts) }
+                Button("Liquidations") { router.openBoard(.liquidations) }
 
                 Button("Launchpad") {
                     router.openLaunchpad()
@@ -88,6 +101,10 @@ struct PowderApp: App {
             SettingsView(router: router)
                 .environmentObject(model)
                 .environmentObject(router.wallets)
+                .environmentObject(router.alerts)
+                .environmentObject(router.directory)
+                .environmentObject(router.liquidations)
+                .environmentObject(router.triggers)
                 .preferredColorScheme(router.theme.colorScheme)
         }
     }

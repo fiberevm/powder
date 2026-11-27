@@ -5,8 +5,12 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="${project_root}/.build"
 module_cache="${build_root}/ModuleCache"
-app_bundle="${build_root}/Powder.app"
+# POWDER_APP_DIR puts the bundle somewhere else, so a release build does not replace the one in daily use.
+app_bundle="${POWDER_APP_DIR:-${build_root}}/Powder.app"
 contents="${app_bundle}/Contents"
+
+# POWDER_ARCH picks the processor: arm64 (Apple silicon, the default) or x86_64 (Intel).
+arch="${POWDER_ARCH:-arm64}"
 
 SWIFTPM_MODULECACHE_OVERRIDE="${module_cache}" \
 CLANG_MODULE_CACHE_PATH="${module_cache}" \
@@ -14,10 +18,11 @@ swift build \
     --package-path "${project_root}" \
     --disable-sandbox \
     --configuration release \
+    --arch "${arch}" \
     --product Powder
 
 mkdir -p "${contents}/MacOS" "${contents}/Resources"
-install -m 755 "${build_root}/arm64-apple-macosx/release/Powder" "${contents}/MacOS/Powder"
+install -m 755 "${build_root}/${arch}-apple-macosx/release/Powder" "${contents}/MacOS/Powder"
 install -m 644 "${project_root}/Support/Info.plist" "${contents}/Info.plist"
 
 # App icon: rasterise Support/AppIcon.svg into an .icns.

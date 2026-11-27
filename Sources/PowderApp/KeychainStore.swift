@@ -4,15 +4,19 @@ import os
 
 struct KeychainStore: Sendable {
     let service = "io.powder.app"
-    let account = "codex-api-key"
+    /// Which key: Codex by default, or another service's (`nozomi`).
+    var account = "codex-api-key"
 
-    /// The key once read, so views and polls asking for it do not go back to the Keychain each time.
-    private static let cached = OSAllocatedUnfairLock<String?>(initialState: nil)
+    static let nozomi = KeychainStore(account: "nozomi-api-key")
+
+    /// Keys once read, by account, so views and polls asking for them do not go back to the Keychain each time.
+    /// An empty string records that the Keychain has none.
+    private static let cached = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
 
     func readAPIKey() -> String? {
-        if let cached = Self.cached.withLock({ $0 }) { return cached }
+        if let cached = Self.cached.withLock({ $0[account] }) { return cached.isEmpty ? nil : cached }
         let value = readFromKeychain()
-        if let value { Self.cached.withLock { $0 = value } }
+        Self.cached.withLock { $0[account] = value ?? "" }
         return value
     }
 
@@ -39,7 +43,7 @@ struct KeychainStore: Sendable {
             return
         }
 
-        Self.cached.withLock { $0 = trimmed }
+        Self.cached.withLock { $0[account] = trimmed }
         let data = Data(trimmed.utf8)
         let update = [kSecValueData as String: data]
         let status = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
@@ -57,7 +61,7 @@ struct KeychainStore: Sendable {
     }
 
     func deleteAPIKey() {
-        Self.cached.withLock { $0 = nil }
+        Self.cached.withLock { $0[account] = "" }
         SecItemDelete(baseQuery as CFDictionary)
     }
 

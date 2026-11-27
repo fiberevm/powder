@@ -236,6 +236,14 @@ enum HLAction {
         ])
     }
 
+    /// Several cancels in one signed request.
+    static func cancel(_ orders: [(asset: Int, orderID: Int64)]) -> HLValue {
+        .map([
+            ("type", .string("cancel")),
+            ("cancels", .array(orders.map { .map([("a", .int(Int64($0.asset))), ("o", .int($0.orderID))]) })),
+        ])
+    }
+
     static func updateLeverage(asset: Int, isCross: Bool, leverage: Int) -> HLValue {
         .map([
             ("type", .string("updateLeverage")),
@@ -527,7 +535,7 @@ enum HyperliquidExchange {
         return (value as? NSNumber)?.doubleValue ?? 0
     }
 
-    private static func post(_ path: String, body: String, session: URLSession = .shared) async throws -> Data {
+    static func post(_ path: String, body: String, session: URLSession = .shared) async throws -> Data {
         var request = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 15)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

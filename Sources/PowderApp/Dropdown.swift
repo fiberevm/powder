@@ -30,6 +30,8 @@ struct DropdownPresentation {
     let anchor: Anchor<CGRect>
     let items: [DropdownItem]
     let minWidth: CGFloat
+    /// Where to open, measured from the anchor's top-left corner (a right click's position). Nil opens under the anchor.
+    var point: CGPoint?
     let close: @MainActor () -> Void
 }
 
@@ -113,20 +115,63 @@ extension View {
                     let anchor = proxy[presentation.anchor]
                     let size = DropdownList.size(for: presentation)
                     // Open downward unless that would run off the bottom; keep the list inside the window.
-                    let opensUp = anchor.maxY + size.height + 6 > proxy.size.height && anchor.minY > size.height
-                    let x = min(max(anchor.minX, 4), max(proxy.size.width - size.width - 4, 4))
-                    let y = opensUp ? anchor.minY - size.height - 2 : anchor.maxY + 2
+                    let place = DropdownPlacement(presentation: presentation, anchor: anchor, size: size, bounds: proxy.size)
 
                     ZStack(alignment: .topLeading) {
                         Color.black.opacity(0.001)
                             .onTapGesture { presentation.close() }
-                        DropdownList(presentation: presentation)
-                            .frame(width: size.width)
-                            .offset(x: x, y: y)
+                        DropdownPop(corner: place.corner) {
+                            DropdownList(presentation: presentation)
+                        }
+                        .frame(width: size.width)
+                        .offset(x: place.origin.x, y: place.origin.y)
+                        // A new position is a new menu, so it animates in again.
+                        .id("\(Int(place.origin.x)):\(Int(place.origin.y))")
                     }
                 }
             }
         }
+    }
+}
+
+/// Where the list goes, and which of its corners stays put while it grows in.
+struct DropdownPlacement {
+    let origin: CGPoint
+    let corner: UnitPoint
+
+    init(presentation: DropdownPresentation, anchor: CGRect, size: CGSize, bounds: CGSize) {
+        if let point = presentation.point {
+            // At the pointer: the list's corner sits on it, flipping left or up when it would leave the window.
+            let x = anchor.minX + point.x, y = anchor.minY + point.y
+            let opensLeft = x + size.width + 4 > bounds.width && x > size.width
+            let opensUp = y + size.height + 4 > bounds.height && y > size.height
+            origin = CGPoint(x: opensLeft ? x - size.width : x, y: opensUp ? y - size.height : y)
+            corner = UnitPoint(x: opensLeft ? 1 : 0, y: opensUp ? 1 : 0)
+        } else {
+            // Under the label unless that would run off the bottom; kept inside the window.
+            let opensUp = anchor.maxY + size.height + 6 > bounds.height && anchor.minY > size.height
+            origin = CGPoint(
+                x: min(max(anchor.minX, 4), max(bounds.width - size.width - 4, 4)),
+                y: opensUp ? anchor.minY - size.height - 2 : anchor.maxY + 2
+            )
+            corner = UnitPoint(x: 0, y: opensUp ? 1 : 0)
+        }
+    }
+}
+
+/// Grows its content out of one corner as it appears.
+private struct DropdownPop<Content: View>: View {
+    let corner: UnitPoint
+    @ViewBuilder let content: Content
+    @State private var isShown = false
+
+    var body: some View {
+        content
+            .scaleEffect(isShown ? 1 : 0.86, anchor: corner)
+            .opacity(isShown ? 1 : 0)
+            .onAppear {
+                withAnimation(.spring(duration: 0.16, bounce: 0.18)) { isShown = true }
+            }
     }
 }
 
@@ -190,9 +235,53 @@ private struct DropdownList: View {
 
 extension View {
     /// Opens the themed list under this view, for menus that have no button of their own (a table row's options).
-    func termMenu(isOpen: Bool, items: [DropdownItem], minWidth: CGFloat = 220, close: @escaping @MainActor () -> Void) -> some View {
+    /// With `at`, it opens at that point of this view instead (a context menu at the pointer).
+    func termMenu(
+        isOpen: Bool, at point: CGPoint? = nil, items: [DropdownItem], minWidth: CGFloat = 220,
+        close: @escaping @MainActor () -> Void
+    ) -> some View {
         anchorPreference(key: DropdownKey.self, value: .bounds) { anchor in
-            isOpen ? DropdownPresentation(anchor: anchor, items: items, minWidth: minWidth, close: close) : nil
+            isOpen ? DropdownPresentation(anchor: anchor, items: items, minWidth: minWidth, point: point, close: close) : nil
         }
+    }
+}
+
+// MARK: - Right click
+
+extension View {
+    /// Runs `action` on a right click (or a control-click) with where it landed in this view,
+    /// measured from the top-left corner; every other click passes through.
+    func onRightClick(_ action: @escaping (CGPoint) -> Void) -> some View {
+        overlay(RightClickCatcher(action: action))
+    }
+}
+
+private struct RightClickCatcher: NSViewRepresentable {
+    let action: (CGPoint) -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ view: CatcherView, context: Context) {
+        view.action = action
+    }
+
+    final class CatcherView: NSView {
+        var action: (CGPoint) -> Void = { _ in }
+        override var isFlipped: Bool { true }
+
+        /// Claims only secondary clicks, so left clicks, drags and scrolling reach the row underneath.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent else { return nil }
+            let isSecondary = event.type == .rightMouseDown
+                || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+            return isSecondary ? super.hitTest(point) : nil
+        }
+
+        override func rightMouseDown(with event: NSEvent) { action(convert(event.locationInWindow, from: nil)) }
+        override func mouseDown(with event: NSEvent) { action(convert(event.locationInWindow, from: nil)) }
     }
 }

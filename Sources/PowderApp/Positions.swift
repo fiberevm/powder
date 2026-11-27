@@ -63,6 +63,10 @@ struct PositionRow: Identifiable, Equatable {
     var token: Int?
     /// For cash: which balance it is idle in.
     var venue: String?
+    /// Set for a Solana holding: the token, for charting and selling it.
+    var solana: SolanaToken?
+
+    var solanaMint: String? { solana?.address }
 
     var side: String {
         switch kind {
@@ -159,6 +163,7 @@ final class PositionsModel: ObservableObject {
                 ))
             }
         }
+        rows += solanaRows(wallets.solana)
         return rows.sorted { a, b in
             if sort.isText {
                 let x = a.sortText(sort), y = b.sortText(sort)
@@ -169,6 +174,42 @@ final class PositionsModel: ObservableObject {
             }
             return a.id < b.id
         }
+    }
+
+    /// Solana wallets: SOL and stablecoins as cash with no PnL, every other token against what was paid for it.
+    private func solanaRows(_ solana: SolanaWalletProvider) -> [PositionRow] {
+        var rows: [PositionRow] = []
+        for wallet in solana.wallets {
+            guard let balances = solana.balances[wallet.id] else { continue }
+            let sol = solana.solPrice
+            var row = PositionRow(
+                id: "\(wallet.id)|sol", walletID: wallet.id, walletName: wallet.name,
+                kind: .cash, coin: "SOL", size: balances.sol, entry: nil, mark: sol,
+                value: balances.sol * (sol ?? 0), pnl: nil, pnlPercent: nil, liquidation: nil, leverage: nil
+            )
+            row.venue = "SOLANA"
+            row.solana = SolanaToken(address: SolanaRPC.wrappedSOL, symbol: "SOL", name: "Solana")
+            rows.append(row)
+
+            for holding in balances.holdings {
+                // Tokens with no market are airdropped dust, and so is anything worth under a cent.
+                guard let price = solana.prices[holding.mint], holding.amount * price.price >= 0.01 else { continue }
+                let isCash = SolanaTokens.stablecoins.contains(holding.mint) || holding.mint == SolanaRPC.wrappedSOL
+                let value = holding.amount * price.price
+                let cost = isCash ? nil : solana.costs[SolanaWalletProvider.costKey(wallet.id, holding.mint)]
+                let pnl = cost.map { (price.price - $0) * holding.amount }
+                var row = PositionRow(
+                    id: "\(wallet.id)|sol|\(holding.mint)", walletID: wallet.id, walletName: wallet.name,
+                    kind: isCash ? .cash : .spot, coin: price.symbol, size: holding.amount, entry: cost, mark: price.price,
+                    value: value, pnl: pnl, pnlPercent: cost.flatMap { $0 > 0 ? price.price / $0 - 1 : nil },
+                    liquidation: nil, leverage: nil
+                )
+                row.venue = isCash ? "SOLANA" : nil
+                row.solana = SolanaToken(address: holding.mint, symbol: price.symbol, name: price.name)
+                rows.append(row)
+            }
+        }
+        return rows
     }
 
     func sort(by column: PositionColumn) {
@@ -212,7 +253,7 @@ final class PositionsModel: ObservableObject {
         guard !isClosing, let row = rows.first(where: { $0.id == selection }) else { return nil }
         guard row.isClosable else {
             statusIsError = false
-            status = "IDLE CASH IS NOT A POSITION: NOTHING TO CLOSE"
+            status = row.solana == nil ? "IDLE CASH IS NOT A POSITION: NOTHING TO CLOSE" : "\(row.coin) IS CASH: NOTHING TO CLOSE"
             return nil
         }
         if armed == row.id {
@@ -281,6 +322,7 @@ struct PositionsView: View {
 
     /// The row whose options are showing.
     @State private var menuRow: String?
+    @State private var menuPoint = CGPoint.zero
 
     private func closeMenu() {
         menuRow = nil
@@ -290,6 +332,25 @@ struct PositionsView: View {
     /// What a click on a row offers.
     private func options(for row: PositionRow) -> [DropdownItem] {
         let amount = "$" + HLFormat.price((row.size * 100).rounded(.down) / 100, decimals: 2)
+        if let token = row.solana, let wallet = wallets.solana.wallet(row.walletID) {
+            var items = [DropdownItem("Open \(row.coin) chart", detail: "O") { closeMenu(); onOpen(row) }]
+            if row.kind == .spot {
+                items.append(DropdownItem("Sell all for SOL at market", detail: "⏎ ⏎") { closeMenu(); onClose(row) })
+            }
+            items.append(DropdownItem("Copy wallet address", detail: wallet.shortAddress, startsSection: true) {
+                closeMenu()
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(wallet.address, forType: .string)
+            })
+            if row.kind == .spot {
+                items.append(DropdownItem("Copy token address", detail: "\(token.address.prefix(4))…\(token.address.suffix(4))") {
+                    closeMenu()
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(token.address, forType: .string)
+                })
+            }
+            return items
+        }
         switch row.kind {
         case .perp:
             return [
@@ -339,18 +400,17 @@ struct PositionsView: View {
                                     )
                                     .equatable()
                                     .id(row.id)
-                                    .termMenu(isOpen: menuRow == row.id, items: options(for: row)) { closeMenu() }
+                                    .termMenu(isOpen: menuRow == row.id, at: menuPoint, items: options(for: row)) { closeMenu() }
                                     .onTapGesture {
                                         model.select(row.id)
-                                        if NSApp.currentEvent?.clickCount == 2 {
-                                            closeMenu()
-                                            onOpen(row)
-                                        } else if menuRow == row.id {
-                                            closeMenu()
-                                        } else {
-                                            menuRow = row.id
-                                            DropdownCenter.dismiss = { menuRow = nil }
-                                        }
+                                        closeMenu()
+                                        if NSApp.currentEvent?.clickCount == 2 { onOpen(row) }
+                                    }
+                                    .onRightClick { point in
+                                        model.select(row.id)
+                                        menuPoint = point
+                                        menuRow = row.id
+                                        DropdownCenter.dismiss = { menuRow = nil }
                                     }
                                 }
                             }
@@ -394,7 +454,7 @@ struct PositionsView: View {
                 .frame(height: 18)
                 .background(Term.accent)
             Text("<GO>").foregroundStyle(Term.accent)
-            Text("\(wallets.wallets.count) WALLET\(wallets.wallets.count == 1 ? "" : "S")")
+            Text("\(walletCount) WALLET\(walletCount == 1 ? "" : "S")")
                 .foregroundStyle(MarketsView.dim)
             Spacer(minLength: 0)
             Text("\(rows.filter { $0.kind != .cash }.count) OPEN")
@@ -408,9 +468,12 @@ struct PositionsView: View {
         }
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 26)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 26, maxHeight: 26, alignment: .leading)
         .background(Self.band)
+        .clipped()
     }
+
+    private var walletCount: Int { wallets.wallets.count }
 
     private func summary(_ rows: [PositionRow]) -> some View {
         // Perp account value already includes unrealized PnL; spot and cash are added at their live value.
@@ -424,7 +487,8 @@ struct PositionsView: View {
         let perpCash = wallets.wallets.reduce(0) { $0 + (wallets.accounts[$1.id]?.withdrawable ?? 0) }
         let spotValue = rows.filter { $0.kind == .spot }.reduce(0) { $0 + $1.value } + cash
         let spotPnl = rows.filter { $0.kind == .spot }.reduce(0) { $0 + ($1.pnl ?? 0) }
-        let equity = perpEquity - fetchedPnl + livePerpPnl + spotValue
+        let solanaCash = rows.filter { $0.kind == .cash && $0.solana != nil }.reduce(0) { $0 + $1.value }
+        let equity = perpEquity - fetchedPnl + livePerpPnl + spotValue + solanaCash
         let pnl = livePerpPnl + spotPnl
         let exposure = perps.reduce(0) { $0 + $1.value }
 
@@ -435,13 +499,16 @@ struct PositionsView: View {
             stat("SPOT", "$" + HLFormat.price(spotValue - cash, decimals: 2))
             stat("CASH SPOT", "$" + HLFormat.price(cash, decimals: 2))
             stat("CASH PERPS", "$" + HLFormat.price(perpCash, decimals: 2))
+            if !wallets.solana.wallets.isEmpty {
+                stat("CASH SOLANA", "$" + HLFormat.price(solanaCash, decimals: 2))
+            }
             stat("LONG", "\(perps.filter { $0.size > 0 }.count)", PowderPalette.signalGreen)
             stat("SHORT", "\(perps.filter { $0.size < 0 }.count)", PowderPalette.riskCoral)
             Spacer(minLength: 0)
         }
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 24)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .leading)
         .clipped()
         .overlay(alignment: .bottom) { TermRule() }
     }
@@ -479,7 +546,7 @@ struct PositionsView: View {
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if wallets.wallets.isEmpty {
+            if walletCount == 0 {
                 Text("NO WALLETS. CREATE OR IMPORT ONE TO TRACK POSITIONS.")
                     .foregroundStyle(MarketsView.dim)
                 Button {
@@ -489,7 +556,7 @@ struct PositionsView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                Text("NO OPEN POSITIONS IN \(wallets.wallets.count) WALLET\(wallets.wallets.count == 1 ? "" : "S").")
+                Text("NO OPEN POSITIONS IN \(walletCount) WALLET\(walletCount == 1 ? "" : "S").")
                     .foregroundStyle(MarketsView.dim)
                 let cash = wallets.wallets.reduce(0) { $0 + (wallets.accounts[$1.id]?.spotUSDC ?? 0) }
                 if cash >= 0.01 {
@@ -531,7 +598,7 @@ struct PositionsView: View {
         .font(Term.font(10.5))
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .frame(height: 22)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 22, maxHeight: 22, alignment: .leading)
         .background(Self.band)
         .clipped()
     }
@@ -545,7 +612,7 @@ struct PositionsView: View {
     }
 }
 
-private struct PositionLine: View, Equatable {
+struct PositionLine: View, Equatable {
     let index: Int
     let row: PositionRow
     let columns: [PositionColumn]
@@ -596,7 +663,7 @@ private struct PositionLine: View, Equatable {
 
     @ViewBuilder
     private func cell(_ column: PositionColumn) -> some View {
-        let decimals = HLFormat.priceDecimals(for: row.mark ?? row.entry ?? 1, szDecimals: 2)
+        let decimals = PositionLine.priceDecimals(row.mark ?? row.entry ?? 1, isSolana: row.solana != nil)
         switch column {
         case .wallet: plain(row.walletName, MarketsView.dim)
         case .kind: plain(row.kind.rawValue, MarketsView.dim)
@@ -604,7 +671,7 @@ private struct PositionLine: View, Equatable {
             Text(row.coin).fontWeight(.bold).foregroundStyle(isReversed ? MarketsView.field : Term.accent)
         case .side:
             plain(row.side, row.kind == .perp ? PowderPalette.market(row.size) : MarketsView.dim, weight: .semibold)
-        case .size: plain(HLFormat.size(abs(row.size), decimals: 4), MarketsView.text)
+        case .size: plain(row.solana != nil ? HLFormat.amount(abs(row.size)) : HLFormat.size(abs(row.size), decimals: 4), MarketsView.text)
         case .entry: plain(row.entry.map { HLFormat.price($0, decimals: decimals) } ?? "—", MarketsView.text)
         case .mark: plain(row.mark.map { HLFormat.price($0, decimals: decimals) } ?? "—", MarketsView.text, weight: .semibold)
         case .value: plain(HLFormat.price(row.value, decimals: 2), MarketsView.text)
@@ -621,5 +688,11 @@ private struct PositionLine: View, Equatable {
         Text(string)
             .fontWeight(weight)
             .foregroundStyle(isReversed ? MarketsView.field : color)
+    }
+
+    /// Solana tokens are often priced far below a cent: about four significant figures, whatever the size.
+    static func priceDecimals(_ price: Double, isSolana: Bool) -> Int {
+        guard isSolana, price > 0, price < 1 else { return HLFormat.priceDecimals(for: price, szDecimals: 2) }
+        return min(Int(ceil(-log10(price))) + 3, 12)
     }
 }

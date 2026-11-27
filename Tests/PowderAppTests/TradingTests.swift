@@ -137,6 +137,14 @@ func walletsAreCreatedImportedNamedAndDeleted() throws {
     #expect(throws: WalletError.duplicate("Main")) { try provider.importWallet(privateKey: testKey.hex) }
     #expect(throws: EthKeyError.self) { try provider.importWallet(privateKey: "nope") }
 
+    // One key, two addresses: the same wallet is also a Solana wallet, and a Solana export imports as the same key.
+    let solanaAddress = try SolanaKey.address(of: testKey)
+    #expect(imported.solanaAddress == solanaAddress)
+    #expect(provider.solana.wallets.map(\.address) == [try #require(first.solanaAddress), solanaAddress])
+    #expect(provider.solana.selectedID == first.id)
+    #expect(provider.exportSolanaKey(imported.id) == (try SolanaKey.export(testKey)))
+    #expect(throws: WalletError.duplicate("Main")) { try provider.importWallet(privateKey: try SolanaKey.export(testKey)) }
+
     // Any number of wallets, each with its own settings.
     for _ in 0..<20 { try provider.create() }
     #expect(provider.wallets.count == 22)
@@ -153,6 +161,7 @@ func walletsAreCreatedImportedNamedAndDeleted() throws {
 
     provider.delete(first.id)
     #expect(provider.wallet(first.id) == nil && provider.exportPrivateKey(first.id) == nil)
+    #expect(!provider.solana.wallets.contains { $0.id == first.id })
     #expect(provider.selectedID != first.id && provider.selectedID != nil)
 }
 

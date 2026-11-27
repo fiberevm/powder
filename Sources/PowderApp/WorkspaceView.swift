@@ -108,6 +108,17 @@ private struct GroupView: View {
                                 onOpen: { router.openMarket(for: $0) },
                                 onClose: { router.close($0, in: positions) }
                             )
+                        } else if let board = tab.board {
+                            switch board {
+                            case .watchlist:
+                                WatchlistView(store: router.watchlist, directory: router.directory, quotes: router.solanaQuotes, onOpen: { router.open($0) })
+                            case .alerts:
+                                AlertsView(store: router.alerts, directory: router.directory, quotes: router.solanaQuotes, onOpen: { router.open($0) })
+                            case .liquidations:
+                                LiquidationsView(model: router.liquidations, onOpen: { router.open(coin: $0) })
+                            }
+                        } else if let history = tab.history {
+                            HistoryView(model: history, wallets: router.wallets, onOpen: { router.openMarket(for: $0) })
                         } else if let web = tab.web {
                             WebTabView(model: web)
                         } else if let list = tab.list {
@@ -323,7 +334,7 @@ private struct TabCell: View {
                 } else if let web = tab.web {
                     WebTabLabel(model: web)
                 } else {
-                    Text(tab.positions != nil ? "Positions" : tab.list == nil ? "Launchpad" : "Markets")
+                    Text(tab.board?.title ?? (tab.positions != nil ? "Positions" : tab.history != nil ? "History" : tab.list == nil ? "Launchpad" : "Markets"))
                 }
             }
             .font(.system(size: 12))
